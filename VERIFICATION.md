@@ -1,3 +1,9 @@
+# Current app and recovery verification — 2026-10-09
+
+Current app/pairing changes, rebuilt APK and fresh local evidence are in [APP_REFRESH.md](APP_REFRESH.md). The preceding backend repair is recorded in [RECOVERY_VERIFICATION.md](RECOVERY_VERIFICATION.md). Exact runtime startup: [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md). The records below concern the earlier October 1 delivery; their notebook/APK hashes do not identify the current 0.3 artifacts. No live device/GPU result is claimed.
+
+## Historical delivery evidence
+
 # Verification for Phone Studio 0.2.0 — router and editing
 
 The matching deliverables are in `finished things/Phone Studio - 2026-10-01 - router and editing/`. Previous 0.1 bundles remain frozen. The APK is an installable **debug build**, application ID `app.phonestudio`, version **0.2.0/code 2**, Android 8.0/API 26 minimum and API 35 target. It has not been installed or opened on a device here.

@@ -1,23 +1,27 @@
 # Phone Studio
 
-Phone Studio 0.2 connects a native Android app to one private router and three image workers. The router hosts a self-contained vision-language assistant, improves prompts, coordinates rendering, stores every version, and selects the closest match. Editing starts from a previous image or a photo-picker upload.
+Phone Studio 0.3 connects a native Android app to one private router and up to three image workers. The router hosts a self-contained vision-language assistant, improves prompts, coordinates rendering, stores every version, and selects the closest match. Editing starts from a previous image or a photo-picker upload.
+
+The app now has QR/paste connection setup, a focused creation screen, collapsible settings, smoother transitions, and library/model search. [APP_REFRESH.md](APP_REFRESH.md) describes installation, the simpler setup, verified checks and rollback. Existing authentication and saved work remain in place.
 
 There are **two notebook types**:
 
 - `PHONE_STUDIO_COLAB.ipynb`: generation/edit worker, run independently on each of the three worker runtimes.
-- `PHONE_STUDIO_ROUTER_COLAB.ipynb`: fourth runtime, router plus the local Huihui-Qwen3.8-27B-abliterated vision model.
+- `PHONE_STUDIO_ROUTER_COLAB.ipynb`: separate runtime, router plus the pinned Huihui-Qwen3.5-4B-abliterated Q4_K_M vision model and matching f16 projector.
 
 The phone saves **only the router connection** for new jobs. Previously saved worker connections remain available for old images and accepted legacy batches.
 
 ## Start here
 
-1. Start the three worker notebooks. Each needs its own valid GPU runtime, ngrok configuration, tunnel password and studio token. Keep the same desired checkpoint and LoRA files available on each worker.
-2. Start the router notebook on its own GPU runtime. Store the three worker connection records in its `PHONE_STUDIO_WORKERS_JSON` Secret. Router credentials and tunnel configuration are independent of worker credentials.
-3. In the phone's **Connect** tab, add the router URL and its username, password and studio token. Check that the assistant and the intended workers are ready.
-4. In **Create**, choose a checkpoint and describe the image. Prompt assistance and visual selection default on; their switches are saved. **Other versions** reveals retained alternatives.
-5. For editing, use the pencil button on an image, or select **Edit image → Choose an image**. Describe the change. Automatic area selection is the default; **Paint area** lets you correct the selection.
+1. Follow [exact repaired startup and acceptance](RECOVERY_STARTUP.md). Upload the two current cleared notebooks; keep existing Secrets, checkpoint and saved data.
+2. Start one worker first with `COMPATIBILITY_MODE=True`; wait for decoded warm-up and authenticated health. Leave healthy workers/accepted jobs alone.
+3. Start the router on its separate permitted Linux T4 runtime. Ordinary setup uses pinned binaries without CUDA compilation. The next cell runs two actual LLM adapter calls; inspect their structure and semantic expectations.
+4. On the updated phone app, scan the router's private QR or paste its setup code and review the address before connecting. Manual fields remain available. Complete one Balanced generation and one manual-mask edit before adding the other two workers.
+5. Validate one three-worker generation and an isolated third-worker restart/rejoin. Confirm recovery retains successful/uncertain accepted work without duplicate renders.
 
 See [setup and usage](ROUTER_GUIDE.md), [model identities and limits](ROUTER_MODEL.md), [planned architecture](ROUTER_STAGE_PLAN.md), [interface contract](ROUTER_API.md), and [verification](VERIFICATION.md).
+
+Live startup findings and small setup corrections are documented in [runtime setup notes](RUNTIME_SETUP.md).
 
 ## What stays saved
 
@@ -25,21 +29,21 @@ Generation prompts, negatives, model/LoRA choices, two sampling presets, seed po
 
 The phone stores up to 60 image records, including alternative versions. With three candidates per request this is approximately 20 requests. Images themselves live in router storage and its configured persistent folder. The viewer has a small information button, pinch zoom, reset zoom, gallery export and an edit button. Metadata includes original prompt, effective tags, review status/reason and source/edit lineage.
 
-Accepted jobs have saved request IDs, studio identity and job IDs. A foreground service follows a router job while the app is backgrounded. Reconnecting reads the saved request rather than blindly creating another GPU render. A changed router state folder is reported explicitly. **Stop** attempts targeted cancellation; older workers may finish an already accepted render. Retrying uses a durable retry key and only confirmed failed workers; uncertain worker acceptance is never blindly resubmitted.
+Accepted jobs have saved request IDs, studio identity and job IDs. A foreground service follows a router job while the app is backgrounded. Reconnecting reads the saved request rather than blindly creating another GPU render. A changed router state folder is reported explicitly. **Stop** attempts targeted cancellation; older workers may finish an already accepted render. Retrying uses a durable retry key. Confirmed execution failures target only the failed worker; known accepted follow/image-copy failures retain their IDs and recover that result without another render. Uncertain worker acceptance is never blindly resubmitted.
 
 ## Generation and editing choices
 
 Only **Balanced (24 steps)** and **Fast (18 steps)** are exposed, using CFG 6.5 and `dpmpp_2m`/`karras`. Canvas choices remain 768×1024, 1024×1024 and 1024×768. Fast, prompt enhancement and experimental acceleration can change output. The selected settings and effective prompt are recorded.
 
-The existing speed improvements remain in the worker notebook: GPU-resident execution where possible, local model/cache paths, guarded attention/conditioning optimizations, warm-up and binary image responses. Optional experimental worker features are requested on by default as previously authorized; unsupported features remain gated with visible status. The phone's extra-acceleration switch controls per-render hooks. Launch-time precision/compilation choices still require a worker restart. Editing bypasses incompatible per-render acceleration hooks to protect the edit graph. Details and rollback are in [speed settings](SPEED_MODES.md), [performance inspection](PERFORMANCE.md), and [GPU research](GPU_ACCELERATION_RESEARCH.md).
+Compatibility mode is the current working baseline. It preserves local model/output caches and ordinary transport, while disabling optional T4/Sage native attention, automatic compilation, approximate denoising/conditioning and experimental FP16 settings. The phone's saved acceleration switch cannot override it. Existing opt-in implementations remain available; their older speed documentation applies only after explicitly disabling compatibility mode.
 
-Editing keeps the chosen SDXL checkpoint. The assistant plans whole-image changes, local refinements/replacements, or outpainting. Automatic local selection uses pinned SAM2.1 Tiny on CPU when compatible; uncertain selection returns a request for a painted mask. Supported WAI v170 replacement/outpaint workers can use the pinned Fooocus auxiliary inpaint patch/head. An ordinary same-checkpoint fallback is labeled. Local edits are cropped with context and composited back onto the normalized source; zero-mask pixels are preserved. Whole-image edits can change the whole image. Source assets are never overwritten.
+Editing keeps the chosen SDXL checkpoint. The assistant plans whole-image changes, local refinements/replacements, or outpainting. Automatic local selection is off for the baseline; explicit opt-in uses guarded pinned SAM2.1 Tiny on CPU when compatible; uncertain selection returns a request for a painted mask. Supported WAI v170 replacement/outpaint workers can use the pinned Fooocus auxiliary inpaint patch/head. An ordinary same-checkpoint fallback is labeled. Local edits are cropped with context and composited back onto the normalized source; zero-mask pixels are preserved. Whole-image edits can change the whole image. Source assets are never overwritten.
 
 The saved **Stronger inpainting** app switch defaults on; disabling it requests the ordinary edit graph. The actual method is recorded per candidate. Prepared edit crops/masks are persisted before worker submission and reused when recovering an accepted edit.
 
 ## Model and infrastructure
 
-The selected assistant is the report's uncensored/abliterated Huihui 27B vision model, served locally with pinned llama.cpp and verified GGUF/projector hashes. No external paid AI provider or added content-moderation service is used. “Uncensored” is the publisher's model description, not a guarantee of zero refusals. The chosen approximately 12 GiB weight/projector bundle is a practical candidate for a separate 16 GB-class GPU; actual fitting, placement, speed and visual judgment remain unverified. Same-weight CPU-projector fallback is reported clearly.
+The default assistant is the precisely pinned 4B vision model/projector pair (3.148 GiB of artifacts), served locally with official llama.cpp b11146. The adapter now sends the pinned server's nested JSON schema and reports categorized inference failures separately from process readiness. Host RAM and GPU VRAM are sampled independently; measured fit, quality and latency remain pending. Automatic CPU-projector retry and automatic segmentation are off. One pinned 9B pair is an explicit quality-only fallback after demonstrated essential 4B failure; it is not downloaded automatically.
 
 Four independent credentials/tunnels are supported as configuration. The notebooks do not create accounts, start the other runtimes, purchase resources, or bypass quotas. Free managed Colab does not guarantee or support this deployment pattern; use permitted/local runtimes. [Colab FAQ](https://research.google.com/colaboratory/faq.html).
 
@@ -59,7 +63,7 @@ CPU/router tests use fixtures and local mock HTTP services. Notebook code is par
 
 Source roles: `app/` is the Android client, `router/` contains the versioned API/journal/LLM/editing/worker orchestration, `tools/` contains bounded pinned setup helpers. Both notebooks embed their needed source so they do not require the repository mounted.
 
-Finished app/notebook/source bundles are versioned under **finished things**. Previous 0.1 snapshots are frozen. Rollback source for this stage is under `.work-router/original/`; active source and the latest finished bundle are identified in [VERIFICATION.md](VERIFICATION.md).
+Finished app/notebook/source bundles are versioned under **finished things**. Previous 0.1 snapshots are frozen. Rollback source for this stage is under `.work-router/original/`; current repair backup and scoped evidence are identified in [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md) and [RECOVERY_VERIFICATION.md](RECOVERY_VERIFICATION.md). Frozen finished bundles remain historical.
 
 ## Security and storage
 

@@ -1,3 +1,7 @@
+# Current baseline precedence — 2026-10-08
+
+`COMPATIBILITY_MODE=True` is the repaired startup default. It forces ordinary PyTorch attention, no optional T4/Sage install, no automatic compilation, no denoising/conditioning experiments and no experimental FP16 flags on every GPU family. Local model/output caches and ordinary transport remain. Requested/effective flags and reasons are printed; saved phone acceleration cannot override the baseline. The options described below are retained as explicit opt-in history, not current effective defaults. See [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md); re-enabling experiments is not required for acceptance.
+
 > Router stage (0.2): new phone jobs use one router, which fans out to the workers and adds optional prompt assistance, durable collection and visual review. Worker speed research below remains relevant; direct-phone fan-out descriptions refer to the preceding version. Editing bypasses incompatible per-render hooks. See [current setup](ROUTER_GUIDE.md) and [verification](VERIFICATION.md).
 
 # Two presets and backend speed tuning

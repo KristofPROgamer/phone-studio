@@ -1,57 +1,61 @@
-# Router model and startup
+# Current router assistant and setup
 
-The router uses the attached report's practical first recommendation, **Huihui-Qwen3.8-27B-abliterated**. Its publisher describes refusal reduction through abliteration and retains the visual subsystem. The implementation adds no content-moderation service. Neither the label nor the setup guarantees zero refusals, faithful reasoning or unchanged quality after quantization. [Publisher model card](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated).
+The default is **Huihui-Qwen3.5-4B-abliterated Q4_K_M with its matching f16 vision projector**, a third-party mradermacher quantization of Huihui's model based on Qwen3.5-4B. The pinned repositories declare Apache-2.0. Publisher claims about abliteration do not guarantee refusal behavior or retained accuracy. Workers still generate/edit pixels with the existing SDXL checkpoint; prompts, images, editing contracts and reviewer provenance remain preserved.
 
-The VLM improves prompts, plans edits and compares actual images. Image workers still generate/edit pixels with the selected SDXL checkpoint. This does not make SDXL editing equal proprietary ChatGPT/Gemini/Grok image models. Original prompts, source images, candidate settings and reviewer identities remain inspectable.
+The authoritative identities and serving settings are `router/model_profile.py`. The router configuration, adapter and setup import them; the notebook embeds that module. Existing historical reviews retain their actual model identity.
 
-## Exact download identities
+## Exact primary artifacts
 
-All model downloads come from `huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF`, revision **`b146b417080fd3e0e842e9539e69921707360aae`**. The helper verifies length and SHA256 before an atomic promotion into the cache. [Pinned publisher files](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/tree/b146b417080fd3e0e842e9539e69921707360aae), [publisher metadata](https://huggingface.co/api/models/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF?blobs=true).
+Repository: `mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF`.
+Revision: `4a5daa6fbefca5fe822dc65fcb95cc4576fa9720`.
 
-| File | Bytes | SHA256 |
+| Artifact | Bytes | SHA256 |
 | --- | ---: | --- |
-| `Huihui-Qwen3.8-27B-abliterated-UD-IQ3_S.gguf` | 11,952,901,024 | `f785ad524b138cd53575410e07e93dfa6eff1cc92ca698264cb9c96973db6886` |
-| `mmproj-model-bf16.gguf` | 931,145,888 | `c9a09064683620bea3d3bfed5d4462e1a97a7d2fff7e5045d6862a0a85eeb5b5` |
+| Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf | 2,707,514,688 | `423f10b6ec2d99c3378143d7cd3b80eb4887b3ed92103103ac59173b404f4f7c` |
+| Huihui-Qwen3.5-4B-abliterated.mmproj-f16.gguf | 672,423,552 | `f14643c11f1e8244c59bca670e2a4c843be4234aa6bb88d0647dae7297798686` |
 
-The repository declares Apache-2.0. The vision projector is essential; a text-only server is reported unavailable rather than being called a visual judge. This particular UD GGUF release is a publisher-modified quantization; its edited-layer range differs from the latest full Transformers checkpoint. Base-model size tables cannot identify the correct Huihui file. In particular the publisher's `Q3_K_L` is larger than a free-tier T4 target because selected tensors use higher precision. No alternate checkpoint or lower quantization is silently substituted.
+Total: **3,379,938,240 bytes / 3.148 GiB**. Exact publisher-hosted metadata was rechecked; weights were not downloaded in local verification. [Immutable metadata](https://huggingface.co/api/models/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/revision/4a5daa6fbefca5fe822dc65fcb95cc4576fa9720?blobs=true), [Huihui model card](https://huggingface.co/huihui-ai/Huihui-Qwen3.5-4B-abliterated).
 
-The serving engine is **llama.cpp v0.5.0**, commit **`7fe450e19305b828c199d602c23a8337aaa1f03b`**, with detected CUDA architecture, including T4/SM75. The model uses the supported `qwen35` architecture. [Pinned release](https://github.com/ggml-org/llama.cpp/releases/tag/v0.5.0), [architecture source](https://raw.githubusercontent.com/ggml-org/llama.cpp/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-arch.cpp), [CUDA build source](https://raw.githubusercontent.com/ggml-org/llama.cpp/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cuda/CMakeLists.txt).
+Downloads use revision-specific URLs, exact sizes/SHA256s and atomic promotion. The default cache is `/content/phone_studio_llm_models/4b-4a5daa6fbefca5fe822dc65fcb95cc4576fa9720/`. The old model/projector remains untouched. Never mix projectors between profiles.
 
-## Resource and startup choices
+## Sole conditional quality fallback
 
-`PHONE_STUDIO_ROUTER_COLAB.ipynb` embeds the router and setup code. Secrets contain the three worker connections; the app saves only the router connection. Both router and LLM bind to loopback. The router port 8080 alone is tunneled, with Basic authentication and the studio token. Port 8081 and its randomly generated API key stay private. Notebook output prints the router URL; copy credentials from your Secrets, not from shared output. Source files and local logs should also remain private.
+Only after stable 4B loading/inference but indispensable quality failure after one targeted prompt correction: explicitly choose `model_profile='9b', quality_fallback_confirmed=True`. Unload the prior model first; download one pair at a time. This does not fix protocol, loader, driver, authentication or memory errors.
 
-Network deployment requires independently reachable worker addresses. One ngrok Free account currently permits three concurrent agents/endpoints and one assigned development domain, so it cannot host four independent remote tunnels for these roles. A blank `NGROK_DOMAIN` uses account defaults; random URLs are not a Free-plan feature. Local private workers can use addresses reachable from the router without public tunnels. The notebook neither purchases capacity nor bypasses account limits. [Official ngrok limits](https://ngrok.com/docs/pricing-limits/free-plan-limits).
+Repository: `mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`.
+Revision: `9f646d7eda193ddf2348134f3bff3d49eed7a2c6`.
 
-The default model cache is runtime-local, requiring approximately 12 GiB plus an 8 GiB disk reserve. Drive holds the job journal backups and assets; it does not also receive the large LLM weights. An optional existing persistent cache path can be set explicitly in the notebook. Build checks need 4 GiB available host RAM and 2 GiB scratch above the reserve; build parallelism is 2 and build timeout 30 minutes. Each download has a 40 minute maximum. Cached artifacts are hash-verified before reuse. Current Torch, torchvision and CUDA are never replaced by this helper.
+| Artifact | Bytes | SHA256 |
+| --- | ---: | --- |
+| Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf | 5,627,045,248 | `ea1858ef4dc4b648b8dbb44612962a0333e945060dd0545ac0f28d7c4416e4b3` |
+| Huihui-Qwen3.5-9B-abliterated.mmproj-f16.gguf | 918,166,016 | `56f07ff42fc9ab24fc06a93dce5a48fb2dbe08bff1a1c6e519d50af450820148` |
 
-One loaded LLM process uses one serial inference slot, 8K context, 256-token batches, 128-token microbatches, FP16 KV storage, automatic fitting and a 1 GiB target reserve. Dynamic image processing is capped at 1024 tokens per image. Analysis previews are resized to at most 1280 pixels per side, encoded as PNG, and used only by the local LLM; candidate originals remain intact. Structured calls disable thinking and bound output to 1400–1800 tokens. The pinned [server API](https://raw.githubusercontent.com/ggml-org/llama.cpp/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/README.md) documents these options, vision inputs and schema output.
+Total: **6.096 GiB**. No fallback is downloaded or selected automatically. [Immutable metadata](https://huggingface.co/api/models/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/revision/9f646d7eda193ddf2348134f3bff3d49eed7a2c6?blobs=true).
 
-The native server has agent execution, web UI and MCP proxy disabled. Its child environment excludes inherited worker/router credentials and tool settings; the router sends only the bounded text/image data required for each task. The build omits unused UI, app, subprocess and OpenSSL components; public HTTPS is supplied by the router tunnel.
+## Serving policy and bounded setup
 
-**Memory estimate, not a measurement:** the two files total 12.00 GiB; 8K FP16 attention KV and recurrent state add roughly 0.65 GiB, before compute buffers and driver allocations. Total usage may reach 14–15+ GiB and can fail to fit. The setup requires a separate 16 GB class or larger GPU with adequate free memory. Automatic fitting may offload layers; inspect the private server log for actual placement. T4 has no native BF16 acceleration, so a BF16-stored projector is not a promised BF16 speed benefit. Supported engine conversion/fallback handles storage types.
+Normal startup uses official **llama.cpp b11146**, commit `7fe450e19305b828c199d602c23a8337aaa1f03b`, with separately pinned CUDA 12.8 Linux x86_64 server/runtime archives. Linux/glibc 2.38+, version identity and CUDA device probes precede weights. System libraries and Torch are not replaced. Source build stays disabled; its old explicit opt-in path is outside the validated baseline. [Official release](https://github.com/ggml-org/llama.cpp/releases/tag/b11146).
 
-A failed GPU-projector startup retries once with the **same weights/projector on CPU**, prints that change, and exposes `llm.degraded=true` through health. It does not pretend to retain the same performance. If both starts fail, setup stops with a clear error. Rerunning setup reuses a verified authenticated server before applying the fresh-process free-memory check. Build/download/setup are first-start costs, not repeated per-render work.
+Archives are size/hash checked and confined on extraction. Staging is probed with its private libraries, stamped with regular-file/symlink/library integrity, then published atomically under a small exclusive lock. Failed probes remove only owned staging and preserve reusable archives. Unknown/unstamped/changed final directories are preserved with a confined quarantine instruction. Probe diagnostics exist in the stated private log, including stage, status and timeout.
 
-Automatic SAM2.1 Tiny segmentation is requested on CPU by default. Its independent helper validates installed Torch/torchvision, uses pinned weights and skips an incompatible installation. Manual masks remain available. See the worker/edit documentation for exact auxiliary identities and preservation limits.
+Serving remains **8192 context, one serial slot, batch 256, microbatch 128, f16 KV, image maximum 1024 tokens, thinking disabled**, and the existing 1280-side analysis preview. All source/candidate images remain in the request; no silent truncation or lower SDXL settings are introduced. Automatic fitting remains visible in the server log. Automatic CPU-projector retry is off; any explicit retry is limited to demonstrated GPU allocation pressure with adequate separately measured host RAM.
 
-## What the adapter verifies
+The primary preflight estimate is artifact MiB plus 1 GiB compute, 1 GiB context/images and 2 GiB headroom (about 7319 MiB free). This is a **provisional estimate, not a measured memory minimum**. A T4/SM75 is the initial target; no expanded Windows/smaller-GPU baseline was validated. Keep the 8 GiB disk reserve; account for archives/extraction separately. Host RAM is independent of VRAM, and process RSS includes shared/file-backed mappings. RAM admission uses process-cgroup and accessible ancestor bounds; unknown bounds cannot authorize optional CPU retry.
 
-- Prompt enhancement requests concise Danbooru-style tags, preserving explicit counts, subjects, relationships and style. Tags are suggestions, not verified taxonomy records. User negatives stay unchanged; original text is stored separately. Invalid replies use the original prompt and visibly report enhancement unavailable.
-- Edit planning receives the actual source and original instruction, returns only approved operation/strength/normalized target coordinates, and preserves user negatives. Coordinates are inputs to segmentation/manual correction; an LLM box is not labeled a precise semantic mask. Output cannot provide executable commands, models, URLs or graphs.
-- Review receives the actual candidates and original request; edit review also includes the source image and instruction. Scores and winner must reference existing candidates exactly once with finite 0–10 scores. An invalid, incomplete or missing result returns review unavailable, with no invented winner. Disabled review similarly retains all unreviewed candidates.
-- Calls use a 180 second cap including serial-slot waiting and obey an earlier job deadline. Cancellation propagates. Replies are bounded to 256 KiB and redirects are disabled. Timing logs contain duration and request ID, without prompt/image bodies or credentials.
+Session fingerprints include exact pair/revision, server identity, serving settings, port and projector/degraded policy. Exported adapter URL/key/degraded fields must agree with the authenticated session before reuse. Ownership checks bind PID/start identity and server model alias; installed files are verified before reuse. A healthy matching session reuses before fresh free-VRAM admission. Profile/settings mismatch or occupied unrelated port stops with a conflict. Interrupted/failed startup cleans up only the process started by that attempt and preserves logs.
 
-This validation enforces structure and provenance, not perceptual correctness. Quantized tagging, attention to details, preservation judgment and refusal behavior still need image-based evaluation.
+The LLM binds loopback on 8081 with a private generated API key. Only the authenticated router is tunneled on its selected port among 8080/8082/8083/8084. Native agent/web UI/MCP proxy stay disabled; child environments exclude router/worker Secrets. Tunnel account capacity remains independent of model fit and is not provisioned by this repair.
 
-## Verification you can run
+## Application adapter and acceptance
 
-1. Start the router notebook: health should report the pinned revision, native vision ready and actual degraded status. Verify the router URL opens only with your credentials; port 8081 should have no public tunnel.
-2. Generate a request containing a precise count and relationship. Inspect original/effective prompts, all candidate images and the review explanation; judge whether the choice actually follows the request.
-3. Disable each assistant option and confirm enhancement/review labels change and every alternative remains accessible. Disconnect the local LLM and confirm review becomes unavailable without an invented selected image.
-4. Upload an image, edit a manually selected small area and compare source/candidates. Confirm unselected source pixels are preserved and lineage/settings are recorded before evaluating automatic selection.
-5. Send back safe GPU/runtime information, the model revision, actual placement, `[phone-studio-router-timing]`/worker timing lines and example differences. Omit Secrets, credential JSON and private source/prompt contents.
+The pinned server reads `response_format.json_schema.schema`. The repaired adapter now uses that wrapper for enhancement, edit planning and actual image ranking; the previous sibling schema was a confirmed defect. [Pinned parser](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-common.cpp#L1185-L1203).
 
-Local adapter tests use tiny raster fixtures, a mocked loopback HTTP server and synthetic replies. They do not load an LLM, compile native CUDA or measure speed. The notebook is generated from saved sources and checked for exact embedded copies; its cells are not executed here.
+Output remains validated: approved edit operations/regions, finite scores, exact candidate coverage, highest-adherence selection and no executable output. Invalid enhancement uses the original prompt with an unavailable label; invalid review retains all candidates without inventing a winner. New manual-mask edits still require a working planner. Calls retain the 180-second deadline including serial-slot waiting and cancellation.
 
-Four free managed Colab runtimes are not a supported availability promise. Google's current FAQ restricts distributed computing workers and remote content-generation interfaces, with variable GPU/resource limits. Use permitted/local runtimes; the code includes no account/quota bypass or paid provisioning. [Official Colab FAQ](https://research.google.com/colaboratory/faq.html).
+Diagnostics distinguish transport/authentication, server rejection/context overflow, queue/inference deadlines, incomplete output, malformed JSON and invalid task fields. Logs contain bounded request/task IDs, image counts/dimensions, schema/profile fingerprints, HTTP status, allowlisted server type/code, finish/usage/reasoning metadata and durations. They exclude prompt/image/credential bodies and never forward arbitrary upstream messages to the phone. Host OOM and GPU OOM require separate memory/process/log evidence.
+
+Health preserves existing fields and adds `processReady`, `inferenceStatus`, `lastInference` and useful degradation messages. Health polling does not run inference, and a successful process probe does not erase a failed task. The existing `ready` field becomes false after failed/unvalidated inference so the unchanged phone displays its safe message; `processReady` stays independently true. An initially untested reachable process retains initial readiness with `inferenceStatus=untested`. Slow worker/catalog checks no longer discard completed LLM/worker observations; expired observations are marked stale/unready. Explicit phone refresh sends uncached worker inventory.
+
+Automatic SAM is off for the baseline, with its guarded CPU route preserved as explicit opt-in. Manual selection avoids optional segmentation setup; stock editing remains when Fooocus is unavailable, with its separate Drive reserve unchanged.
+
+Follow [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md): two actual adapter smokes, one source-plus-three review, the remaining small semantic cases, one-worker generation/manual edit, then multi-worker recovery. Read [RECOVERY_VERIFICATION.md](RECOVERY_VERIFICATION.md) for the current local scope. Model fit, host-memory cause, real quality/latency and phone/isolated third-worker operation were not established by CPU mocks or notebook parsing.
