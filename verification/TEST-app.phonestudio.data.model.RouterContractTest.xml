@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="app.phonestudio.data.model.RouterContractTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-10-01T16:43:26" hostname="PREDATOR" time="0.145">
+  <properties/>
+  <testcase name="assetUrlRemainsWithinSavedHttpsPrefix" classname="app.phonestudio.data.model.RouterContractTest" time="0.11"/>
+  <testcase name="serverSnapshotAcceptsAdditiveFieldsAndRetainsWorkerUncertainty" classname="app.phonestudio.data.model.RouterContractTest" time="0.014"/>
+  <testcase name="portraitBrushCoordinatesSurviveChangedPreviewShape" classname="app.phonestudio.data.model.RouterContractTest" time="0.001"/>
+  <testcase name="editedEnvelopeIncludesAssetLineageWithoutPrivateFilePaths" classname="app.phonestudio.data.model.RouterContractTest" time="0.011"/>
+  <testcase name="pendingReviewHidesCandidatesAndUnavailableReviewExposesThem" classname="app.phonestudio.data.model.RouterContractTest" time="0.0"/>
+  <testcase name="historicalRecordsStayOnTheirOriginalTransport" classname="app.phonestudio.data.model.RouterContractTest" time="0.002"/>
+  <testcase name="draftSerializationKeepsSourceAndMaskWhenAppRestarts" classname="app.phonestudio.data.model.RouterContractTest" time="0.002"/>
+  <testcase name="routerCatalogDecodesWorkerAvailabilityInsteadOfTheSingleRouter" classname="app.phonestudio.data.model.RouterContractTest" time="0.003"/>
+  <testcase name="editedImageRestoresRequestedCanvasRatherThanLargeSourceDimensions" classname="app.phonestudio.data.model.RouterContractTest" time="0.0"/>
+  <testcase name="generationEnvelopePreservesOriginalIntentAndDefaultOptions" classname="app.phonestudio.data.model.RouterContractTest" time="0.001"/>
+  <testcase name="failedWorkerRemainsRetryableWhenOtherCandidatesSucceeded" classname="app.phonestudio.data.model.RouterContractTest" time="0.0"/>
+  <testcase name="panoramaBrushRejectsMarginsAndMapsImageCenter" classname="app.phonestudio.data.model.RouterContractTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

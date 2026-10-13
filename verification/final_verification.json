@@ -1,0 +1,150 @@
+{
+  "date": "2026-10-01",
+  "scope": "Local build/unit/lint and CPU/mock checks plus saved source/AST/hash checks only; no device, Colab, notebook cell, real LLM, CUDA or GPU execution.",
+  "overall_pass": true,
+  "android_tests": 43,
+  "router_tests": 104,
+  "worker_source_checks": 27,
+  "checks": [
+    {
+      "name": "PHONE_STUDIO_COLAB.ipynb:unique_ids",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "PHONE_STUDIO_COLAB.ipynb:unexecuted",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "PHONE_STUDIO_COLAB.ipynb:syntax",
+      "passed": true,
+      "details": 6
+    },
+    {
+      "name": "worker:exact_edit_setup",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "PHONE_STUDIO_ROUTER_COLAB.ipynb:unique_ids",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "PHONE_STUDIO_ROUTER_COLAB.ipynb:unexecuted",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "PHONE_STUDIO_ROUTER_COLAB.ipynb:syntax",
+      "passed": true,
+      "details": 5
+    },
+    {
+      "name": "router:embedded_inventory",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/__init__.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/assets.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/config.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/editing.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/journal.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/llm.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/server.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/service.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/workers.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/workflows.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:router/requirements.txt",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:tools/router_setup.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "router:exact_source:tools/router_segmentation_setup.py",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "worker:existing_static_checks",
+      "passed": true,
+      "details": 27
+    },
+    {
+      "name": "android:unit_tests",
+      "passed": true,
+      "details": 43
+    },
+    {
+      "name": "android:lint",
+      "passed": true,
+      "details": 0
+    },
+    {
+      "name": "router:cpu_mock_tests",
+      "passed": true,
+      "details": 104
+    },
+    {
+      "name": "android:apk_exists",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "android:apk_after_sources",
+      "passed": true,
+      "details": ""
+    }
+  ],
+  "sha256": {
+    "PHONE_STUDIO_COLAB.ipynb": "534b6b9b4dbcf1927b2c582c0ceb96e87ea167aa8f9d44c84ad5f72560d5ae23",
+    "PHONE_STUDIO_ROUTER_COLAB.ipynb": "dd898258a9de12ff9477ce8a0bf5627273d9a6f467f49fe0685da35c3935ec65",
+    "app/build/outputs/apk/debug/app-debug.apk": "7a18f2419680a38753c0e1ad10e0fcf85e91870bfe54f0bfdc949a5b9ec90974"
+  }
+}

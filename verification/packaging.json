@@ -1,0 +1,14 @@
+{
+  "packaged_at_utc": "2026-10-01T16:52:57.981864+00:00",
+  "release_date": "2026-10-01",
+  "version": "0.2.0",
+  "source_files": 99,
+  "android_tests": 43,
+  "router_tests": 104,
+  "lint_issues": 0,
+  "worker_source_checks": 27,
+  "stage_checks": 27,
+  "source_archive_entries_verified": true,
+  "artifact_copies_verified": true,
+  "scope": "Local build/unit/lint and CPU/mock checks plus saved source/AST/hash checks only; no device, Colab, notebook cell, real LLM, CUDA or GPU execution."
+}
