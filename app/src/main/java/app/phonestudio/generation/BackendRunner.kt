@@ -1,6 +1,7 @@
 package app.phonestudio.generation
 
 import app.phonestudio.data.local.GenerationBatchStore
+import app.phonestudio.data.local.BatchStorageException
 import app.phonestudio.data.model.BackendJob
 import app.phonestudio.data.model.BackendRunState
 import app.phonestudio.data.model.ConnectionConfig
@@ -25,6 +26,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.WebSocket
+
+private class ConfirmedBackendFailure(message: String) : ApiException(message)
 
 /**
  * Runs one backend's share of a batch: probe, submit (or recover), follow, collect.
@@ -152,16 +155,25 @@ class BackendRunner(
                     state = BackendRunState.COMPLETE,
                     message = "Done",
                     images = images,
+                    recoveryRequired = false,
                     stepsDone = it.stepsTotal,
                     finishedAtMillis = System.currentTimeMillis()
                 )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (_: BatchStorageException) {
+            store.failInMemory(batchId, connectionId)
+            onChanged()
+        } catch (confirmed: ConfirmedBackendFailure) {
+            try { fail(connectionId, confirmed.message ?: "The earlier render failed", confirmed = true) }
+            catch (_: BatchStorageException) { store.failInMemory(batchId, connectionId); onChanged() }
         } catch (unreachable: BackendUnreachableException) {
-            skip(connectionId, unreachable.message ?: "Did not respond")
+            try { skip(connectionId, unreachable.message ?: "Did not respond") }
+            catch (_: BatchStorageException) { store.failInMemory(batchId, connectionId); onChanged() }
         } catch (error: Exception) {
-            fail(connectionId, error.message ?: "Render did not finish")
+            try { fail(connectionId, error.message ?: "Render did not finish") }
+            catch (_: BatchStorageException) { store.failInMemory(batchId, connectionId); onChanged() }
         } finally {
             socket?.cancel()
         }
@@ -310,7 +322,7 @@ class BackendRunner(
             api.latestJob(config, clientId, job.requestId)
         } ?: throw ApiException(TIMEOUT_MESSAGE)
         if (latest.requestId == job.requestId && latest.status == "error") {
-            throw ApiException(latest.error ?: "The earlier render failed on this backend")
+            throw ConfirmedBackendFailure(latest.error ?: "The earlier render failed on this backend")
         }
         if (latest.status == "none" && latest.promptId == null &&
             (latest.requestId == null || latest.requestId == job.requestId)) {
@@ -368,10 +380,10 @@ class BackendRunner(
                         toImage(connectionId, promptId, index, descriptor, parameters)
                     }
                 }
-                if (snapshot.failed) throw ApiException(
+                if (snapshot.failed) throw ConfirmedBackendFailure(
                     backendFailure() ?: "ComfyUI reported an error while rendering. Check the Colab output."
                 )
-                if (snapshot.completed) throw ApiException("Finished without producing an image")
+                if (snapshot.completed) throw ConfirmedBackendFailure("Finished without producing an image")
 
                 val elapsed = System.currentTimeMillis() - (job(connectionId)?.startedAtMillis ?: 0L)
                 val interval = pollInterval(elapsed, socketAlive())
@@ -485,17 +497,19 @@ class BackendRunner(
                 state = BackendRunState.SKIPPED,
                 message = reason,
                 failureReason = reason,
+                recoveryRequired = it.recoveryRequired || it.submissionAttempted || it.promptId != null,
                 finishedAtMillis = System.currentTimeMillis()
             )
         }
     }
 
-    private fun fail(connectionId: String, reason: String) {
+    private fun fail(connectionId: String, reason: String, confirmed: Boolean = false) {
         report(connectionId, durable = true) {
             it.copy(
                 state = BackendRunState.FAILED,
                 message = reason,
                 failureReason = reason,
+                recoveryRequired = !confirmed && (it.recoveryRequired || it.submissionAttempted || it.promptId != null),
                 finishedAtMillis = System.currentTimeMillis()
             )
         }

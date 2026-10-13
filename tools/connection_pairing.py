@@ -53,6 +53,31 @@ def _token(value):
     return value
 
 
+def _basic_text(value, label, limit, *, trimmed=False):
+    value = _text(value, label, limit, trimmed=trimmed)
+    if any(ord(char) > 255 for char in value):
+        raise PairingError(f"Connection {label} contains characters unsupported by the existing Basic authentication.")
+    return value
+
+
+def _basic_user(value):
+    value = _basic_text(value, "user", 128, trimmed=True)
+    if ":" in value:
+        raise PairingError("Connection user cannot contain a colon.")
+    return value
+
+
+def validate_basic_credentials(user, password):
+    """Match the phone/server's existing Latin1 protocol without altering secrets."""
+    return _basic_user(user), _basic_text(password, "password", 512)
+
+
+def basic_authorization(user, password):
+    user, password = validate_basic_credentials(user, password)
+    encoded = base64.b64encode((user + ":" + password).encode("latin1", errors="strict")).decode("ascii")
+    return "Basic " + encoded
+
+
 def clean_server_url(value):
     value = _text(value, "address", 2048, trimmed=True)
     if not value.startswith("https://") or any(char.isspace() for char in value) or "\\" in value:
@@ -86,7 +111,7 @@ def clean_server_url(value):
             or any(part in (".", "..") for part in decoded_path.split("/"))
             or re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path)):
         raise PairingError("Connection address path is invalid.")
-    host = "[" + hostname.lower() + "]" if ":" in hostname else hostname.lower().removesuffix(".")
+    host = "[" + ipaddress.IPv6Address(hostname).compressed + "]" if ":" in hostname else hostname.lower().removesuffix(".")
     netloc = host + (":" + str(port) if port is not None and port != 443 else "")
     return urlunsplit(("https", netloc, parsed.path.rstrip("/"), "", ""))
 
@@ -107,11 +132,9 @@ def validate_pairing(body, *, expected_kind=None):
     result = {"version": 1, "kind": kind,
               "name": _text(body["name"], "name", 80, trimmed=True),
               "serverUrl": clean_server_url(body["serverUrl"]),
-              "tunnelUser": _text(body["tunnelUser"], "user", 128, trimmed=True),
-              "tunnelPassword": _text(body["tunnelPassword"], "password", 512),
+              "tunnelUser": _basic_user(body["tunnelUser"]),
+              "tunnelPassword": _basic_text(body["tunnelPassword"], "password", 512),
               "studioToken": _token(body["studioToken"])}
-    if ":" in result["tunnelUser"]:
-        raise PairingError("Connection user cannot contain a colon.")
     if kind == "worker":
         worker_id = body.get("workerId")
         if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", worker_id):
@@ -198,7 +221,7 @@ def _credential_lock(path, timeout):
             pass
 
 
-def load_router_credentials(path, token_secret="", password_secret="", *, timeout=10):
+def load_router_credentials(path, token_secret="", password_secret="", *, timeout=10, tunnel_user="studio"):
     """Keep existing Secrets; generate missing credentials once under persistent state.
 
     Per-notebook Secret overrides never overwrite an existing stored credential file.
@@ -206,6 +229,7 @@ def load_router_credentials(path, token_secret="", password_secret="", *, timeou
     """
     if not isinstance(token_secret, str) or not isinstance(password_secret, str):
         raise PairingError("Provided router credentials are invalid.")
+    _basic_user(tunnel_user)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _credential_lock(path.with_name(path.name + ".lock"), timeout):
@@ -218,13 +242,13 @@ def load_router_credentials(path, token_secret="", password_secret="", *, timeou
             if not isinstance(stored, dict) or set(stored) != {"version", "phone_studio_token", "tunnel_password"} or type(stored["version"]) is not int or stored["version"] != 1:
                 raise PairingError("Stored router credentials are invalid; the file was preserved.")
             _token(stored["phone_studio_token"])
-            _text(stored["tunnel_password"], "stored password", 512)
+            _basic_text(stored["tunnel_password"], "password", 512)
         except FileNotFoundError:
             stored = None
         except (OSError, ValueError, UnicodeError):
             raise PairingError("Stored router credentials cannot be read; preserve the file and inspect it privately.") from None
         token = _token(token_secret or (stored or {}).get("phone_studio_token") or secrets.token_urlsafe(32))
-        password = _text(password_secret or (stored or {}).get("tunnel_password") or secrets.token_urlsafe(24), "password", 512)
+        password = _basic_text(password_secret or (stored or {}).get("tunnel_password") or secrets.token_urlsafe(24), "password", 512)
         if stored is None:
             staging = path.with_name(path.name + "." + uuid.uuid4().hex + ".part")
             try:

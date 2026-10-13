@@ -20,6 +20,8 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import app.phonestudio.data.model.MaskPoint
 import app.phonestudio.data.model.MaskStroke
 import app.phonestudio.ui.StudioUiState
@@ -103,7 +105,8 @@ fun EditPanel(state: StudioUiState, viewModel: StudioViewModel, onPickImage: () 
                 Text("Stronger inpainting", color = Mist, style = MaterialTheme.typography.titleMedium)
                 Text("Adds edit guidance when supported. Turn off to compare standard edits.", color = Slate, style = MaterialTheme.typography.labelSmall)
             }
-            Switch(checked = state.parameters.auxiliaryInpaint, onCheckedChange = { value -> viewModel.updateParameters { it.copy(auxiliaryInpaint = value) } })
+            Switch(checked = state.parameters.auxiliaryInpaint, onCheckedChange = { value -> viewModel.updateParameters { it.copy(auxiliaryInpaint = value) } },
+                modifier = Modifier.semantics { contentDescription = "Stronger inpainting" })
         }
         Text("Higher preservation asks for a gentler edit. Exact identity and intricate edits still depend on the image model. Your source, instructions and settings stay saved when you leave.",
             color = Slate, style = MaterialTheme.typography.labelSmall)

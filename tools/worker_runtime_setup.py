@@ -95,23 +95,40 @@ def exclusive_artifact(path, timeout=30):
             path.unlink()
 
 
+def _credential_values(token, password):
+    # Kept self-contained for the standalone embedded bootstrap. These are the
+    # same existing Latin1 Basic/header rules as the pairing helper and phone.
+    if (not isinstance(token, str) or not token.strip() or len(token) > 512
+            or token != token.strip() or any(not 32 <= ord(char) <= 126 for char in token)):
+        raise RuntimeError("Private worker token is invalid for the authenticated header; existing credentials were preserved.")
+    if (not isinstance(password, str) or not password.strip() or len(password) > 512
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 or ord(char) > 255 for char in password)):
+        raise RuntimeError("Private worker password contains characters unsupported by existing Basic authentication; existing credentials were preserved.")
+    return token, password
+
+
 def load_credentials(path, token_secret="", password_secret=""):
     import secrets
+    if not isinstance(token_secret, str) or not isinstance(password_secret, str):
+        raise RuntimeError("Provided private worker credentials are invalid; existing credentials were preserved.")
     path = Path(path)
     with exclusive_artifact(path.with_name(path.name + ".lock")):
+        stored_missing = False
         try:
             stored = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            stored = {}
+            stored = None
+            stored_missing = True
         except (ValueError, OSError):
             raise RuntimeError("Existing private credential file cannot be read; preserve it "
                                "and inspect it privately before rerunning.") from None
-        if not isinstance(stored, dict):
-            raise RuntimeError("Existing private credential file is invalid; it was preserved.")
-        token = token_secret or stored.get("phone_studio_token") or secrets.token_urlsafe(32)
-        password = password_secret or stored.get("tunnel_password") or secrets.token_urlsafe(24)
-        if not all(isinstance(v, str) and v for v in (token, password)):
-            raise RuntimeError("Existing private credentials are invalid; they were preserved.")
+        if not stored_missing:
+            if not isinstance(stored, dict):
+                raise RuntimeError("Existing private credential file is invalid; it was preserved.")
+            _credential_values(stored.get("phone_studio_token"), stored.get("tunnel_password"))
+        token, password = _credential_values(
+            token_secret or (stored or {}).get("phone_studio_token") or secrets.token_urlsafe(32),
+            password_secret or (stored or {}).get("tunnel_password") or secrets.token_urlsafe(24))
         # A worker's Secret overrides affect that worker only. Never rewrite a
         # shared existing credential file with a different instance's values.
         if not path.exists():

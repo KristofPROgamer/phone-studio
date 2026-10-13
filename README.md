@@ -1,8 +1,8 @@
 # Phone Studio
 
-Phone Studio 0.3 connects a native Android app to one private router and up to three image workers. The router hosts a self-contained vision-language assistant, improves prompts, coordinates rendering, stores every version, and selects the closest match. Editing starts from a previous image or a photo-picker upload.
+Phone Studio 0.3.1 connects a native Android app to one private router and up to three image workers. The router hosts a self-contained vision-language assistant, improves prompts, coordinates rendering, stores every version, and selects the closest match. Editing starts from a previous image or a photo-picker upload.
 
-The app now has QR/paste connection setup, a focused creation screen, collapsible settings, smoother transitions, and library/model search. [APP_REFRESH.md](APP_REFRESH.md) describes installation, the simpler setup, verified checks and rollback. Existing authentication and saved work remain in place.
+The app now has QR/paste connection setup, a focused creation screen, collapsible settings, smoother transitions, and library/model search. [APP_REFRESH.md](APP_REFRESH.md) describes the simpler setup; [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md) records the current audit fixes, verification and rollback. Existing authentication and saved work remain in place.
 
 There are **two notebook types**:
 

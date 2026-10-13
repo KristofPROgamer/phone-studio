@@ -41,6 +41,24 @@ def _text(value, label, limit=8000, required=False):
     return value
 
 
+def _basic_credential(value, label, limit, *, username=False):
+    value = _text(value, label, limit)
+    # Empty Basic fields are supported for existing token-only private workers.
+    # Nonempty fields must retain exactly the bytes used by the Latin1 clients.
+    if value and (not value.strip() or any(ord(char) < 32 or 127 <= ord(char) <= 159 or ord(char) > 255 for char in value)):
+        raise RouterError(f"{label} contains characters unsupported by existing Basic authentication.")
+    if username and (":" in value or value != value.strip()):
+        raise RouterError(f"{label} must be a clean username without a colon.")
+    return value
+
+
+def _studio_token(value, label):
+    value = _text(value, label, 512, required=True)
+    if value != value.strip() or any(not 32 <= ord(char) <= 126 for char in value):
+        raise RouterError(f"{label} must use visible ASCII text without outer whitespace for its authenticated header.")
+    return value
+
+
 def _number(value, label, low, high):
     if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or not low <= value <= high:
         raise RouterError(f"{label} must be between {low} and {high}.")
@@ -131,9 +149,9 @@ class WorkerConfig:
             raise RouterError("Configured workers need a final HTTPS address (HTTP only on loopback).")
         return cls(identifier(body.get("workerId"), "Worker ID"),
                    _text(body.get("name", body["workerId"]), "Worker name", 80, True), url,
-                   _text(body.get("tunnelUser", "studio"), "Tunnel user", 128),
-                   _text(body.get("tunnelPassword", ""), "Tunnel password", 512),
-                   _text(body.get("studioToken", ""), "Worker token", 512, True))
+                   _basic_credential(body.get("tunnelUser", "studio"), "Tunnel user", 128, username=True),
+                   _basic_credential(body.get("tunnelPassword", ""), "Tunnel password", 512),
+                   _studio_token(body.get("studioToken", ""), "Worker token"))
 
 
 @dataclass
@@ -166,9 +184,9 @@ class Config:
         configs = tuple(WorkerConfig.from_dict(item) for item in workers)
         if len({item.worker_id for item in configs}) != len(configs):
             raise RouterError("Configured worker IDs must be unique.")
-        token = os.environ.get("PHONE_STUDIO_TOKEN", "")
-        if not token or len(token) > 512:
-            raise RouterError("Set PHONE_STUDIO_TOKEN to a private studio token.")
+        token = _studio_token(os.environ.get("PHONE_STUDIO_TOKEN", ""), "Router token")
+        basic_user = _basic_credential(os.environ.get("PHONE_STUDIO_ROUTER_USER", ""), "Router tunnel user", 128, username=True)
+        basic_password = _basic_credential(os.environ.get("PHONE_STUDIO_ROUTER_PASSWORD", ""), "Router tunnel password", 512)
         return cls(root=Path(os.environ.get("PHONE_STUDIO_ROUTER_ROOT", "/content/phone-studio-router")),
             drive=Path(os.environ.get("PHONE_STUDIO_ROUTER_DRIVE", "/content/drive/MyDrive/PhoneStudioRouter")),
             token=token, workers=configs,
@@ -178,7 +196,7 @@ class Config:
             llm_revision=os.environ.get("PHONE_STUDIO_LLM_REVISION", cls.llm_revision),
             host=os.environ.get("PHONE_STUDIO_ROUTER_HOST", "127.0.0.1"),
             port=int(os.environ.get("PHONE_STUDIO_ROUTER_PORT", "8080")),
-            basic_user=os.environ.get("PHONE_STUDIO_ROUTER_USER", ""),
-            basic_password=os.environ.get("PHONE_STUDIO_ROUTER_PASSWORD", ""),
+            basic_user=basic_user,
+            basic_password=basic_password,
             asset_quota_bytes=int(os.environ.get("PHONE_STUDIO_ROUTER_ASSET_MAX_MB", "2048")) * 1024**2)
 

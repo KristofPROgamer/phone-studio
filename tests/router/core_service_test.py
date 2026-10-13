@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from router.config import Config, RouterError, WorkerConfig
+from router.config import Config, RouterError, WorkerConfig, validate_request
 from router.service import RouterService
 from router.workers import WorkerFailure
 
@@ -612,3 +612,52 @@ class RouterServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "running")
         self.assertEqual(result["progress"], 33)
         self.assertTrue(all(worker["progress"] == 33 for worker in result["workers"]))
+
+    async def test_outer_deadline_resumes_known_accepted_workers_and_preserves_completed_peer(self):
+        self.workers.gates = {name: asyncio.Event() for name in ("w2", "w3")}
+        accepted = await self.service.submit(self.body())
+        for _ in range(300):
+            saved = await self.service.get(accepted["jobId"])
+            if saved["candidates"] and all(worker.get("promptId") for worker in saved["workers"]):
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(saved["candidates"]), 1)
+        task = self.service.tasks[accepted["jobId"]]
+        task.cancel()  # Process interruption leaves accepted identities durable.
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await self.service.set_fields(accepted["jobId"], deadlineMillis=0)
+        await self.service._run_guarded(accepted["jobId"])
+        expired = await self.service.get(accepted["jobId"])
+        self.assertEqual(expired["state"], "partial")
+        self.assertEqual(expired["candidates"], saved["candidates"])
+        self.assertEqual(expired["workers"][0], saved["workers"][0])
+        for old, worker in zip(saved["workers"][1:], expired["workers"][1:]):
+            self.assertEqual(worker["state"], "failed")
+            self.assertTrue(worker["resumeOnly"])
+            for key in ("promptId", "runtimeId", "clientId", "requestId", "renderMetadata"):
+                self.assertEqual(worker[key], old[key])
+        for gate in self.workers.gates.values():
+            gate.set()
+        await self.service.retry(accepted["jobId"], "resume-expired-accepted")
+        done = await self.finished(accepted["jobId"])
+        self.assertEqual(done["state"], "complete")
+        self.assertEqual(len(done["candidates"]), 3)
+        self.assertEqual([call[0] for call in self.workers.calls].count("w1"), 1)
+        self.assertTrue(all(call[2] == {} for call in self.workers.calls[3:]))
+
+    async def test_outer_deadline_keeps_missing_acceptance_uncertain(self):
+        workers = [{"workerId": worker.worker_id, "name": worker.name, "state": "queued",
+                    "promptId": None, "runtimeId": "runtime-1", "clientId": "client-" + worker.worker_id,
+                    "requestId": "request-" + worker.worker_id, "submissionAttempted": True,
+                    "renderMetadata": {}} for worker in self.config.workers]
+        saved, _ = self.service.journal.create_job(validate_request(self.body()), workers, 60)
+        await self.service.set_fields(saved["jobId"], deadlineMillis=0)
+        await self.service._run_guarded(saved["jobId"])
+        expired = await self.service.get(saved["jobId"])
+        self.assertEqual(expired["state"], "submission_uncertain")
+        self.assertTrue(all(worker["state"] == "submission_uncertain" for worker in expired["workers"]))
+        with self.assertRaises(RouterError) as caught:
+            await self.service.retry(saved["jobId"], "unsafe-retry")
+        self.assertEqual(caught.exception.code, "submission_uncertain")
+        self.assertEqual(self.workers.calls, [])

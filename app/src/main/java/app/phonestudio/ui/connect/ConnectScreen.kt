@@ -44,6 +44,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import app.phonestudio.data.model.ConnectionConfig
 import app.phonestudio.data.model.ConnectionSetupCode
 import app.phonestudio.data.model.SetupCodeException
@@ -397,6 +399,7 @@ private fun BackendPanel(
             Switch(
                 checked = card.config.enabled,
                 onCheckedChange = onEnabledChange,
+                modifier = Modifier.semantics { contentDescription = "Enable ${card.config.displayName}" },
                 colors = SwitchDefaults.colors(checkedTrackColor = accent, checkedThumbColor = Ink)
             )
         }

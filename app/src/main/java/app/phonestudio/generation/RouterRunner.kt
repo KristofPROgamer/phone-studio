@@ -1,6 +1,7 @@
 package app.phonestudio.generation
 
 import app.phonestudio.data.local.GenerationBatchStore
+import app.phonestudio.data.local.BatchStorageException
 import app.phonestudio.data.model.*
 import app.phonestudio.data.remote.ApiException
 import app.phonestudio.data.remote.RouterApi
@@ -19,7 +20,11 @@ class RouterRunner(
     private val api: RouterApi,
     private val store: GenerationBatchStore,
     private val batchId: String,
-    private val onChanged: () -> Unit
+    private val onChanged: () -> Unit,
+    private val timing: (String, String, String?) -> Unit = { requestId, stage, promptId ->
+        if (stage == "resumed") GenerationTiming.resumeIfNeeded(requestId)
+        else GenerationTiming.mark(requestId, stage, promptId)
+    }
 ) {
     suspend fun run(config: ConnectionConfig, deadlineMillis: Long) {
         var socket: WebSocket? = null
@@ -27,7 +32,7 @@ class RouterRunner(
         try {
             var batch = store.current()?.takeIf { it.batchId == batchId } ?: return
             val job = batch.targets.single()
-            GenerationTiming.resumeIfNeeded(job.requestId)
+            timing(job.requestId, "resumed", null)
             if (System.currentTimeMillis() >= deadlineMillis) throw ApiException("This phone's waiting period expired. Recover the saved router job before starting another render.")
             val health = api.health(config)
             if (health.service != "phone-studio-router" || health.protocolVersion != 2 || health.studioId.isBlank()) {
@@ -65,11 +70,20 @@ class RouterRunner(
                 if (job.studioId.isNotBlank() && snapshot.studioId != job.studioId) {
                     throw ApiException("This is a different router session. Restore the original saved router folder to recover this job.")
                 }
-                if (batch.routerRetry) {
-                    snapshot = api.retry(config, job.promptId, batch.batchId)
+                validate(snapshot, batch, config)
+                val retryEligible = batch.routerRetry && snapshot.terminal && snapshot.workers.any {
+                        it.state in setOf("failed", "skipped", "cancelled")
+                    } && snapshot.workers.none { it.state == "submission_uncertain" }
+                applySnapshot(config, snapshot, keepActive = retryEligible)
+                if (retryEligible) {
+                    val retryId = batch.routerRetryRequestId ?: batch.batchId
+                    // Reserve the action key before POST; an ambiguous reply reuses it.
+                    batch = store.updateBatch(batchId, true) { it.copy(routerRetryRequestId = retryId) } ?: return
+                    snapshot = api.retry(config, job.promptId, retryId)
                     currentCoroutineContext().ensureActive()
-                    batch = store.updateBatch(batchId, true) { it.copy(routerRetry = false) } ?: return
+                    validate(snapshot, batch, config)
                 }
+                batch = store.updateBatch(batchId, true) { it.copy(routerRetry = false, routerRetryRequestId = null) } ?: return
             } else {
                 val request = requestFor(batch)
                 var maySubmit = !job.submissionAttempted
@@ -95,8 +109,8 @@ class RouterRunner(
             }
             val accepted = snapshot ?: throw ApiException("The router could not confirm this request. Its saved request ID remains on this phone.")
             validate(accepted, batch, config)
-            apply(config, accepted)
-            GenerationTiming.mark(job.requestId, "submitted", accepted.jobId)
+            applySnapshot(config, accepted)
+            timing(job.requestId, "submitted", accepted.jobId)
             socket = api.watch(config, accepted.jobId) { wake.trySend(Unit) }
             var latest = accepted
             while (!latest.terminal && System.currentTimeMillis() < deadlineMillis) {
@@ -106,31 +120,76 @@ class RouterRunner(
                     validate(next, batch, config)
                     if (next.revision > latest.revision) {
                         latest = next
-                        apply(config, next)
+                        applySnapshot(config, next)
                     }
                 } catch (error: TransientApiException) {
                     report(config) { it.copy(message = "Router offline; reconnecting. Your accepted job is saved.") }
                 }
             }
             if (!latest.terminal) throw ApiException("The phone stopped waiting after 30 minutes. The job ID is saved; reconnect to check the router before starting another render.")
-            GenerationTiming.mark(job.requestId, "outputs_ready", accepted.jobId)
+            timing(job.requestId, "outputs_ready", accepted.jobId)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (_: BatchStorageException) {
+            store.failInMemory(batchId, config.id)
+            onChanged()
         } catch (error: Exception) {
-            report(config, true) { it.copy(state = BackendRunState.FAILED, message = error.message ?: "Router job failed",
-                failureReason = error.message ?: "Router job failed", finishedAtMillis = System.currentTimeMillis()) }
+            try {
+                report(config, true) { it.copy(state = BackendRunState.FAILED, message = error.message ?: "Router job failed",
+                    failureReason = error.message ?: "Router job failed", finishedAtMillis = System.currentTimeMillis(),
+                    recoveryRequired = it.recoveryRequired || it.submissionAttempted || it.promptId != null) }
+            } catch (_: BatchStorageException) { store.failInMemory(batchId, config.id); onChanged() }
         } finally { socket?.close(1000, "Done"); wake.close() }
+    }
+
+    internal suspend fun cancel(config: ConnectionConfig, batch: GenerationBatch) {
+        val job = batch.targets.single()
+        val submitted = job.submissionAttempted || job.promptId != null
+        val snapshot = if (submitted) {
+            val health = api.health(config)
+            if (health.service != "phone-studio-router" || health.protocolVersion != 2 ||
+                health.studioId.isBlank() || (job.studioId.isNotBlank() && job.studioId != health.studioId)) {
+                throw ApiException("Cancellation could not be confirmed in the saved router session.")
+            }
+            fun validate(saved: app.phonestudio.data.model.RouterSnapshot) {
+                if (saved.schemaVersion != 2 || saved.clientId != batch.clientId || saved.requestId != job.requestId ||
+                    saved.studioId != health.studioId || (job.promptId != null && saved.jobId != job.promptId)) {
+                    throw ApiException("Cancellation returned a different saved request. Restore the original router session.")
+                }
+            }
+            val accepted = job.promptId?.let { api.status(config, it) }
+                ?: api.recover(config, batch.clientId, job.requestId)
+                ?: throw ApiException("Cancellation could not be confirmed. Recover the saved request before submitting again.")
+            validate(accepted)
+            api.cancel(config, accepted.jobId).also { cancelled ->
+                validate(cancelled)
+                val unconfirmed = cancelled.workers.any { it.state == "submission_uncertain" } || !cancelled.terminal
+                applySnapshot(config, cancelled, cancellationUnconfirmed = unconfirmed)
+                if (unconfirmed) {
+                    throw ApiException("Remote cancellation was not confirmed. The accepted request remains saved for recovery.")
+                }
+            }
+        } else null
+        if (snapshot != null && snapshot.state != "cancelled") return // Work already finished; keep its stored candidates.
+        store.updateJob(batch.batchId, config.id, true) {
+            it.copy(state = if (it.images.isEmpty()) BackendRunState.SKIPPED else BackendRunState.COMPLETE,
+                message = "Stopped", routerState = "cancelled", promptId = snapshot?.jobId ?: it.promptId,
+                failureReason = "Stopped by you", finishedAtMillis = System.currentTimeMillis())
+        }
     }
 
     private fun validate(snapshot: RouterSnapshot, batch: GenerationBatch, config: ConnectionConfig) {
         if (snapshot.schemaVersion != 2 || snapshot.clientId != batch.clientId || snapshot.requestId != batch.targets.single().requestId) {
             throw ApiException("The router returned a different request. Check its session folder before retrying.")
         }
+        val knownJob = batch.targets.single().promptId
+        if (knownJob != null && snapshot.jobId != knownJob) throw ApiException("The router returned a different saved job. Restore the original session before retrying.")
         val savedStudio = store.current()?.job(config.id)?.studioId.orEmpty()
         if (savedStudio.isNotBlank() && savedStudio != snapshot.studioId) throw ApiException("The router's saved session changed. Restore the original folder.")
     }
 
-    private fun apply(config: ConnectionConfig, snapshot: RouterSnapshot) {
+    internal fun applySnapshot(config: ConnectionConfig, snapshot: RouterSnapshot, keepActive: Boolean = false,
+        cancellationUnconfirmed: Boolean = false) {
         val winner = snapshot.selection.winnerCandidateId
         val selectionStatus = if (snapshot.selection.status == "selected" && snapshot.candidates.none { it.candidateId == winner })
             "unavailable" else snapshot.selection.status
@@ -156,14 +215,17 @@ class RouterRunner(
             )
         }
         val saved = store.current()?.job(config.id)
-        val durable = snapshot.terminal || saved?.promptId != snapshot.jobId || saved.images != images
+        val durable = cancellationUnconfirmed || snapshot.terminal || saved?.promptId != snapshot.jobId || saved.images != images
         report(config, durable) { job -> job.copy(
             promptId = snapshot.jobId, studioId = snapshot.studioId, routerWorkers = snapshot.workers,
-            routerState = snapshot.state, warnings = snapshot.warnings, images = images,
-            state = if (!snapshot.terminal) BackendRunState.RUNNING else if (images.isNotEmpty()) BackendRunState.COMPLETE else BackendRunState.FAILED,
-            message = snapshot.stageLabel, failureReason = if (snapshot.terminal && (images.isEmpty() || snapshot.state != "complete")) snapshot.error ?: snapshot.stageLabel else null,
+            routerState = if (cancellationUnconfirmed) "cancellation_unconfirmed" else snapshot.state, warnings = snapshot.warnings, images = images,
+            recoveryRequired = cancellationUnconfirmed || !snapshot.terminal || snapshot.state == "submission_uncertain" || snapshot.workers.any { it.state == "submission_uncertain" },
+            state = if (cancellationUnconfirmed) BackendRunState.FAILED else if (keepActive) BackendRunState.SUBMITTING else if (!snapshot.terminal) BackendRunState.RUNNING else if (images.isNotEmpty()) BackendRunState.COMPLETE else BackendRunState.FAILED,
+            message = if (cancellationUnconfirmed) "Remote cancellation was not confirmed" else snapshot.stageLabel,
+            failureReason = if (cancellationUnconfirmed) "Recover the saved request before submitting again."
+                else if (snapshot.terminal && (images.isEmpty() || snapshot.state != "complete")) snapshot.error ?: snapshot.stageLabel else null,
             stepsDone = snapshot.workers.sumOf { it.stepsDone }, stepsTotal = snapshot.workers.sumOf { it.stepsTotal },
-            finishedAtMillis = if (snapshot.terminal) System.currentTimeMillis() else 0
+            finishedAtMillis = if (cancellationUnconfirmed || snapshot.terminal) System.currentTimeMillis() else 0
         ) }
     }
 

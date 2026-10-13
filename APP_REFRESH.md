@@ -1,6 +1,6 @@
-# Phone Studio 0.3 — 9 October 2026
+# Phone Studio 0.3.1 — 9 October 2026
 
-The app and notebooks have been updated. Install `app/build/outputs/apk/debug/app-debug.apk` **over the existing app** to keep its saved connections, library, drafts and accepted jobs. This is a rebuilt debug APK, version 0.3.0/code 3, application ID `app.phonestudio`, Android 8/API 26 or newer. Do not uninstall or clear app data to update it.
+The app and notebooks have been updated. Install `app/build/outputs/apk/debug/app-debug.apk` **over the existing app** to keep its saved connections, library, drafts and accepted jobs. This is a rebuilt debug APK, version 0.3.1/code 4, application ID `app.phonestudio`, Android 8/API 26 or newer. Do not uninstall or clear app data to update it. The follow-up audit, current results and rollback checkpoint are in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). The frozen 0.3.0 bundle remains intact.
 
 ## Easier connection
 
@@ -25,19 +25,21 @@ Detailed runtime requirements, bounded assistant acceptance, phone generation/ed
 
 The audit also fixed duplicate download starts, stale worker status after disconnect/removal, cancellation swallowed by optional work, credential encryption reporting, and credential durability before saved IDs are published. Active jobs prevent access-changing/removal/disconnect edits until stopped or finished. QR imports retain the router ID used by existing images and accepted jobs.
 
-Unsupported studio-token header characters are rejected with a safe message before saving/requesting; existing bytes are not silently rewritten. Historical image requests have the same protection. Proxy/HTML error bodies are not echoed into app notices. Automatically generated credentials use the supported ASCII format; this update does not introduce a new Basic-auth charset policy for custom passwords.
+Unsupported studio-token header characters are rejected with a safe message before saving/requesting; existing bytes are not silently rewritten. Historical image requests have the same protection. Proxy/HTML error bodies are not echoed into app notices. Automatically generated credentials use ASCII. Supported custom passwords retain Latin-1 encoding and exact spaces across notebooks, phone and server. Unsupported characters fail safely before publication or GPU setup; existing credential files are retained. Requests capture their credentials with their endpoint, so changing saved settings cannot mix an old request with a new password.
 
-## Verification
+## Historical 0.3.0 verification
+
+The following results identify the preceding frozen 0.3.0 delivery. Current source-bound 0.3.1 results are in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md).
 
 - **64 Android JVM tests passed**, zero failures/errors/skips, including strict setup parsing, saved-ID/active-job guards, error privacy, and the exact Python-generated QR matrices decoded by the phone's ZXing implementation.
 - **249 CPU/router tests and 13 subtests passed**, one Linux process-group fixture skipped on Windows, in 42.53 seconds. Tests include existing generation/editing/recovery contracts and private-code/credential preparation under synthetic Secrets.
 - Android Kotlin/resources compile, lint and debug APK packaging passed. The final lint report has no issues. The APK signature is checked against the pre-update APK before delivery.
 - **28 worker source-policy checks passed**. Notebooks are cleared/parsed, embedded helper hashes match, and the router has **17** exact embedded files. The pinned 4B pair, prebuilt/no-compile defaults, SDXL settings and protocol 2 remain unchanged.
 
-Evidence is `.work-router/app-refresh-verification-2026-10-09/verification.json`, including source hashes, commands, timestamps, exit codes, test/lint counts, APK identity/signature comparison, backup checks and changed/added-file inventory. Logs and source-bound run metadata are in the same folder. Recheck artifacts without running notebook/GPU cells:
+Historical evidence is `.work-router/app-refresh-verification-2026-10-09/verification.json`, including source hashes, commands, timestamps, exit codes, test/lint counts, APK identity/signature comparison, backup checks and changed/added-file inventory. Logs and source-bound run metadata are in the same folder. Recheck the current artifacts without running notebook/GPU cells:
 
 ```powershell
-& '.\.work-router\test-venv\Scripts\python.exe' '.\.work-router\verify_app_refresh.py'
+& '.\.work-router\test-venv\Scripts\python.exe' '.\.work-router\verify_extensive.py'
 ```
 
 Only ZXing core 3.5.3 was added to the existing Android stack; no toolchain/dependency upgrade was performed. QR preview optionally uses the publisher's pure-Python [qrcode 8.2 SVG support](https://pypi.org/project/qrcode/8.2/), with a bounded, no-dependencies wheel install and paste fallback. The new tests use public synthetic credentials only.
@@ -45,6 +47,8 @@ Only ZXing core 3.5.3 was added to the existing Android stack; no toolchain/depe
 No phone or emulator was connected. Actual camera permission/scanning, UI layout/animation at device font sizes/rotation, install/data retention, real 4B inference, GPU memory headroom, SDXL generation/manual editing and live third-worker rejoin remain untested. The Windows local GPU is not the selected Linux deployment. Local tests and QR matrices do not establish live runtime success or visual quality. The historical RAM and third-worker causes remain unproven/unreproduced.
 
 ## Rollback
+
+For the 0.3.1 follow-up, use `.work-router/post-delivery-backup-20261009T055938Z/` and the exact procedure in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). It restores the preceding 0.3.0 checkpoint. The older instructions below describe the initial UI update only.
 
 The pre-update checkpoint is `.work-router/app-refresh-backup-20261008T205128Z/`; `manifest.json` lists **108** verified backed-up files, including the previous APK. The final verification report lists files changed/added by this update. Preserve credentials, library/drafts, job journals, assets, model caches and frozen bundles.
 

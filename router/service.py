@@ -216,8 +216,13 @@ class RouterService:
                 uncertain = False
                 for worker in current["workers"]:
                     if worker["state"] not in WORKER_TERMINAL:
-                        worker["state"] = "submission_uncertain" if worker.get("submissionAttempted") else "failed"
-                        worker["stage"] = "Unconfirmed" if worker.get("submissionAttempted") else "Failed"
+                        accepted = worker.get("submissionAttempted")
+                        known = accepted and all(isinstance(worker.get(key), str) and worker[key]
+                            for key in ("promptId", "runtimeId", "requestId", "clientId")) and isinstance(worker.get("renderMetadata"), dict)
+                        worker["state"] = "submission_uncertain" if accepted and not known else "failed"
+                        worker["stage"] = "Unconfirmed" if accepted and not known else ("Resume accepted result" if known else "Failed")
+                        if known:
+                            worker["resumeOnly"] = True
                         worker["error"] = message
                     uncertain |= worker["state"] == "submission_uncertain"
                 current["state"] = "partial" if current["candidates"] else ("submission_uncertain" if uncertain else "failed")

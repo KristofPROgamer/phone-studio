@@ -8,6 +8,9 @@ import subprocess
 import sys
 import types
 from unittest.mock import patch
+import urllib.request
+
+from aiohttp import BasicAuth
 
 import pytest
 
@@ -109,6 +112,67 @@ def test_role_worker_identity_and_duplicate_validation():
 def test_ipv6_and_trailing_dns_dot_normalization():
     assert pairing.clean_server_url("https://[::1]:443/base/") == "https://[::1]/base"
     assert pairing.clean_server_url("https://Router.example./") == "https://router.example"
+    assert pairing.clean_server_url("https://[0:0:0:0:0:0:0:1]:443/") == "https://[::1]"
+    first = payload("worker", serverUrl="https://[::1]")
+    second = payload("worker", workerId="worker-2", serverUrl="https://[0:0:0:0:0:0:0:1]")
+    with pytest.raises(pairing.PairingError, match="distinct"):
+        pairing.workers_from_codes(pairing.encode_pairing(first) + "\n" + pairing.encode_pairing(second))
+
+
+def test_basic_authorization_matches_server_latin1_and_preserves_password_spaces():
+    user, password = "stúdio", " leading-é-password: trailing "
+    header = pairing.basic_authorization(user, password)
+    decoded = BasicAuth.decode(header)
+    assert decoded.login == user and decoded.password == password
+    assert base64.b64decode(header.removeprefix("Basic ")) == (user + ":" + password).encode("latin1")
+
+
+@pytest.mark.parametrize("user,password", [
+    ("studio", "astral-😀-marker"), ("unsupported-😀-marker", "password"),
+    ("user:marker", "password"), ("studio", "control-\x85-marker"), ("studio", "line\nmarker"),
+])
+def test_basic_unsupported_values_fail_safely_before_new_credential_file(tmp_path, user, password):
+    for call in (lambda: pairing.basic_authorization(user, password),
+                 lambda: pairing.encode_pairing(payload(tunnelUser=user, tunnelPassword=password))):
+        with pytest.raises(pairing.PairingError) as error:
+            call()
+        assert "marker" not in str(error.value) and "astral" not in str(error.value)
+    path = tmp_path / "credentials.json"
+    with pytest.raises(pairing.PairingError):
+        pairing.load_router_credentials(path, "token", password, tunnel_user=user)
+    assert not path.exists()
+
+
+def test_unsupported_stored_basic_password_is_preserved_even_with_valid_secret_override(tmp_path):
+    path = tmp_path / "credentials.json"
+    original = json.dumps({"version": 1, "phone_studio_token": "valid-token", "tunnel_password": "astral-😀-marker"}).encode()
+    path.write_bytes(original)
+    with pytest.raises(pairing.PairingError) as error:
+        pairing.load_router_credentials(path, "override-token", "override-password")
+    assert "marker" not in str(error.value)
+    assert path.read_bytes() == original
+
+
+def test_saved_router_health_builds_matching_latin1_header_without_network():
+    root = Path(__file__).resolve().parents[2]
+    notebook = json.loads((root / "PHONE_STUDIO_ROUTER_COLAB.ipynb").read_text(encoding="utf-8"))
+    source = "".join(next(cell["source"] for cell in notebook["cells"] if cell["id"] == "router-serve"))
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "router_health")
+    namespace = {"_pairing": {"basic_authorization": pairing.basic_authorization}, "PORT": 8080,
+                 "PHONE_STUDIO_TOKEN": "valid-token", "TUNNEL_USER": "stúdio", "TUNNEL_PASSWORD": " é-password ",
+                 "urllib": types.SimpleNamespace(request=urllib.request), "json": json}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<saved-router-health>", "exec"), namespace)
+    response = types.SimpleNamespace(read=lambda _: b'{"ok":true}')
+    class FakeResponse:
+        def __enter__(self):
+            return response
+        def __exit__(self, *_):
+            pass
+    with patch.object(urllib.request, "urlopen", return_value=FakeResponse()) as open_mock:
+        assert namespace["router_health"]() == {"ok": True}
+    request = open_mock.call_args.args[0]
+    decoded = BasicAuth.decode(request.get_header("Authorization"))
+    assert decoded.login == "stúdio" and decoded.password == " é-password "
 
 
 def test_html_escapes_labels_and_keeps_code_in_private_details():

@@ -8,6 +8,7 @@ import android.hardware.Camera
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -16,11 +17,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -35,6 +39,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -58,10 +67,11 @@ import com.google.zxing.qrcode.QRCodeReader
 internal fun SetupQrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val maxDialogHeight = LocalConfiguration.current.screenHeightDp.dp * 0.88f
     val resultCallback by rememberUpdatedState(onResult)
     var cameraError by remember { mutableStateOf<String?>(null) }
     val cameraView = remember(context) {
-        SetupCameraView(context, onCode = { resultCallback(it) }, onUnavailable = {
+        SetupCameraView(context, onCode = { resultCallback(it) }, onAvailable = { cameraError = null }, onUnavailable = {
             cameraError = "Camera unavailable. Close this scanner and paste the router setup code instead."
         })
     }
@@ -79,17 +89,26 @@ internal fun SetupQrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     }
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            Modifier.clip(RoundedCornerShape(24.dp)).background(Panel).padding(20.dp),
+            Modifier.fillMaxWidth().heightIn(max = maxDialogHeight).clip(RoundedCornerShape(24.dp)).background(Panel).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Scan your router QR", color = Mist, style = MaterialTheme.typography.titleLarge)
-            Text("Open Phone setup in the router notebook. Hold its QR inside the camera view.", color = Slate,
-                style = MaterialTheme.typography.bodyMedium)
-            Box(Modifier.fillMaxWidth().aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).background(Color.Black)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Scan your router QR", color = Mist, style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                TextButton(onClick = onDismiss, modifier = Modifier.semantics { contentDescription = "Close scanner" }) {
+                    Text("Close", color = Periwinkle)
+                }
+            }
+            Column(Modifier.fillMaxWidth().heightIn(max = maxDialogHeight * 0.25f).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Open Phone setup in the router notebook. Hold its QR inside the camera view.", color = Slate,
+                    style = MaterialTheme.typography.bodyMedium)
+                cameraError?.let { Text(it, color = Mist, style = MaterialTheme.typography.bodyMedium) }
+            }
+            // Header/Close are measured before this preview; short windows shrink the preview instead of losing the controls.
+            Box(Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)).background(Color.Black)) {
                 AndroidView(factory = { cameraView }, modifier = Modifier.fillMaxSize())
             }
-            cameraError?.let { Text(it, color = Mist, style = MaterialTheme.typography.bodyMedium) }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Close scanner", color = Periwinkle) }
         }
     }
 }
@@ -100,12 +119,14 @@ internal fun SetupQrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
 private class SetupCameraView(
     context: android.content.Context,
     private val onCode: (String) -> Unit,
+    private val onAvailable: () -> Unit,
     private val onUnavailable: () -> Unit
 ) : SurfaceView(context), SurfaceHolder.Callback {
     private val thread = HandlerThread("studio-qr-camera").apply { start() }
     private val cameraHandler = Handler(thread.looper)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val reader = QRCodeReader()
+    private val autoFocusToken = Any()
     private var camera: Camera? = null
     @Volatile private var foreground = false
     @Volatile private var surfaceReady = false
@@ -134,7 +155,7 @@ private class SetupCameraView(
         cameraHandler.removeCallbacksAndMessages(null)
         cameraHandler.post { releaseCamera(); thread.quitSafely() }
     }
-    override fun surfaceCreated(holder: SurfaceHolder) { surfaceReady = true; cameraHandler.post { openCamera() } }
+    override fun surfaceCreated(holder: SurfaceHolder) { surfaceReady = true; cameraHandler.post { found = false; openCamera() } }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
     override fun surfaceDestroyed(holder: SurfaceHolder) { surfaceReady = false; generation++; cameraHandler.post { releaseCamera() } }
 
@@ -172,11 +193,20 @@ private class SetupCameraView(
             opened.setPreviewDisplay(holder)
             if (disposed || !foreground || !surfaceReady || generation != expected) { releaseCamera(); return }
             opened.startPreview()
+            mainHandler.post { if (!disposed && foreground && generation == expected) onAvailable() }
+            if (parameters.focusMode == Camera.Parameters.FOCUS_MODE_AUTO) focusCamera(opened, expected)
             nextFrame(opened, expected)
         } catch (_: Exception) {
             releaseCamera()
             mainHandler.post { if (!disposed && foreground && generation == expected) onUnavailable() }
         }
+    }
+
+    /** AUTO needs an explicit focus action. Two-second retries handle a changing phone/screen distance without a busy loop. */
+    private fun focusCamera(opened: Camera, expected: Int) {
+        if (disposed || !foreground || !surfaceReady || camera !== opened || generation != expected || found) return
+        runCatching { opened.cancelAutoFocus(); opened.autoFocus(null) }
+        cameraHandler.postAtTime({ focusCamera(opened, expected) }, autoFocusToken, SystemClock.uptimeMillis() + 2000L)
     }
 
     private fun nextFrame(opened: Camera, expected: Int) {
@@ -207,8 +237,10 @@ private class SetupCameraView(
     }
 
     private fun releaseCamera() {
+        cameraHandler.removeCallbacksAndMessages(autoFocusToken)
         val owned = camera; camera = null
         if (owned != null) {
+            runCatching { owned.cancelAutoFocus() }
             runCatching { owned.setPreviewCallback(null) }
             runCatching { owned.stopPreview() }
             runCatching { owned.release() }

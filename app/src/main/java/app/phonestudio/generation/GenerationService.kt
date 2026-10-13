@@ -10,12 +10,16 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import app.phonestudio.core.AppContainer
 import app.phonestudio.core.studioContainer
+import app.phonestudio.data.local.BatchStorageException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -34,6 +38,8 @@ class GenerationService : Service() {
     private var runner: Job? = null
     private var runningBatchId: String? = null
     private var latestStartId: Int = 0
+    private var cancellation: Job? = null
+    private var cancellingBatchId: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -53,32 +59,61 @@ class GenerationService : Service() {
             if (expected != null && container.batchStore.current()?.batchId != expected && runningBatchId != expected) {
                 return START_REDELIVER_INTENT // A delayed Stop must not cancel a newer render.
             }
+            val original = container.batchStore.current()?.takeIf { expected == null || it.batchId == expected }
+            if (cancellation?.isActive == true && cancellingBatchId == original?.batchId) return START_NOT_STICKY
+            val previousRunner = runner
             runningBatchId = null
-            runner?.cancel()
+            previousRunner?.cancel()
             runner = null
-            val stopped = container.batchStore.current()?.takeIf { expected == null || it.batchId == expected }
-            serviceScope.launch {
+            cancellingBatchId = original?.batchId
+            cancellation = serviceScope.launch(start = CoroutineStart.LAZY) {
+                previousRunner?.cancelAndJoin()
+                // A one-shot POST may have finished while cancellation waited.
+                val stopped = container.batchStore.current()?.takeIf { it.batchId == original?.batchId } ?: original
                 if (stopped?.transport == "router") {
                     try { container.orchestrator.cancelRouter(stopped) }
-                    catch (error: Exception) {
-                        stopped.targets.forEach { job -> container.batchStore.updateJob(stopped.batchId, job.connectionId, true) {
-                            it.copy(state = app.phonestudio.data.model.BackendRunState.FAILED,
-                                message = "Stopped waiting; router cancellation was not confirmed",
-                                failureReason = "Cancellation was not confirmed. Reconnect to recover the saved job before submitting again.",
-                                finishedAtMillis = System.currentTimeMillis())
-                        } }
+                    catch (_: BatchStorageException) {
+                        stopped.targets.forEach { container.batchStore.failInMemory(stopped.batchId, it.connectionId) }
                     }
-                } else if (stopped != null && container.batchStore.current()?.batchId == stopped.batchId) container.batchStore.clear()
+                    catch (error: Exception) {
+                        stopped.targets.forEach { job ->
+                            try { container.batchStore.updateJob(stopped.batchId, job.connectionId, true) {
+                                it.copy(state = app.phonestudio.data.model.BackendRunState.FAILED,
+                                    message = "Stopped waiting; router cancellation was not confirmed", routerState = "cancellation_unconfirmed",
+                                    recoveryRequired = it.recoveryRequired || it.submissionAttempted || it.promptId != null,
+                                    failureReason = "Cancellation was not confirmed. Reconnect to recover the saved job before submitting again.",
+                                    finishedAtMillis = System.currentTimeMillis())
+                            } } catch (_: BatchStorageException) { container.batchStore.failInMemory(stopped.batchId, job.connectionId) }
+                        }
+                    }
+                } else if (stopped != null && container.batchStore.current()?.batchId == stopped.batchId) {
+                    try { stopped.targets.forEach { job -> container.batchStore.updateJob(stopped.batchId, job.connectionId, true) {
+                        it.copy(state = if (it.images.isEmpty()) app.phonestudio.data.model.BackendRunState.SKIPPED else app.phonestudio.data.model.BackendRunState.COMPLETE,
+                            message = "Stopped waiting; accepted work remains saved",
+                            recoveryRequired = it.recoveryRequired || it.submissionAttempted || it.promptId != null,
+                            failureReason = "Stopped waiting; recover accepted work before submitting again.", finishedAtMillis = System.currentTimeMillis())
+                    } } }
+                    catch (_: BatchStorageException) { stopped.targets.forEach { container.batchStore.failInMemory(stopped.batchId, it.connectionId) } }
+                }
+                val owner = currentCoroutineContext()[Job]
                 withContext(Dispatchers.Main.immediate) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    notifications.clearProgress()
-                    stopSelfResult(startId)
+                    if (cancellation === owner) {
+                        cancellation = null
+                        cancellingBatchId = null
+                        if (canFinishCancellation(runningBatchId, container.batchStore.current()?.batchId, stopped?.batchId)) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            notifications.clearProgress()
+                            stopSelfResult(latestStartId)
+                        }
+                    }
                 }
             }
+            cancellation?.start()
             return START_NOT_STICKY
         }
 
         val batch = container.batchStore.current()
+        if (cancellation?.isActive == true && cancellingBatchId == batch?.batchId) return START_NOT_STICKY
         if (batch == null || !batch.isActive) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             notifications.clearProgress()
@@ -156,6 +191,9 @@ class GenerationService : Service() {
     companion object {
         const val ACTION_CANCEL = "app.phonestudio.action.CANCEL_GENERATION"
         private const val EXPECTED_BATCH = "expected_batch"
+
+        internal fun canFinishCancellation(running: String?, current: String?, stopped: String?): Boolean =
+            running == null && (current == null || current == stopped)
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

@@ -16,6 +16,7 @@ import app.phonestudio.core.studioContainer
 import app.phonestudio.data.model.GeneratedImage
 import app.phonestudio.ui.StudioScreen
 import app.phonestudio.ui.StudioViewModel
+import app.phonestudio.ui.PendingPermissionActions
 import app.phonestudio.ui.theme.PhoneStudioTheme
 
 class MainActivity : ComponentActivity() {
@@ -24,22 +25,31 @@ class MainActivity : ComponentActivity() {
         if (uri != null) studioViewModel.importSource(uri)
     }
 
-    private var notificationPermissionResult: ((Boolean) -> Unit)? = null
+    private var pendingPermissions = PendingPermissionActions()
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            notificationPermissionResult?.invoke(granted)
-            notificationPermissionResult = null
+            val requested = pendingPermissions.notificationRequested
+            pendingPermissions = pendingPermissions.clearNotifications()
+            if (requested) {
+                studioViewModel.setNotifyOnCompletion(granted)
+                if (!granted) studioViewModel.showNotice("Allow notifications to receive finished-render alerts.")
+            } else if (granted) {
+                studioViewModel.showNotice("Notification permission granted. Turn on Notify when ready to use it.")
+            }
         }
 
-    private var storagePermissionResult: ((Boolean) -> Unit)? = null
     private val storagePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            storagePermissionResult?.invoke(granted)
-            storagePermissionResult = null
+            val save = pendingPermissions.gallerySave
+            pendingPermissions = pendingPermissions.clearGallery()
+            if (!granted) studioViewModel.showNotice("Allow storage access to save images on Android 8 or 9.")
+            else if (save != null) studioViewModel.saveToGallery(save.image())
+            else studioViewModel.showNotice("Storage permission granted. Tap Save again to choose the image.")
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingPermissions = PendingPermissionActions.restore(savedInstanceState?.getString(PENDING_PERMISSIONS))
         val container = applicationContext.studioContainer()
         studioViewModel = ViewModelProvider(this, StudioViewModel.factory(container))[StudioViewModel::class.java]
 
@@ -59,6 +69,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(PENDING_PERMISSIONS, pendingPermissions.snapshot())
+        super.onSaveInstanceState(outState)
+    }
+
     /**
      * Asked for when the user turns completion alerts on, rather than on every
      * cold start. The old build fired the prompt from onCreate whether or not
@@ -66,20 +81,20 @@ class MainActivity : ComponentActivity() {
      */
     private fun updateCompletionNotifications(viewModel: StudioViewModel, enabled: Boolean) {
         if (!enabled || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            pendingPermissions = pendingPermissions.clearNotifications()
             viewModel.setNotifyOnCompletion(enabled)
             return
         }
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) {
+            pendingPermissions = pendingPermissions.clearNotifications()
             viewModel.setNotifyOnCompletion(true)
             return
         }
 
-        notificationPermissionResult = { allowed ->
-            viewModel.setNotifyOnCompletion(allowed)
-            if (!allowed) viewModel.showNotice("Allow notifications to receive finished-render alerts.")
-        }
+        if (pendingPermissions.notificationRequested) return
+        pendingPermissions = pendingPermissions.requestNotifications()
         notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
@@ -95,13 +110,13 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        storagePermissionResult = { allowed ->
-            if (allowed) {
-                viewModel.saveToGallery(image)
-            } else {
-                viewModel.showNotice("Allow storage access to save images on Android 8 or 9.")
-            }
+        if (pendingPermissions.gallerySave != null) {
+            viewModel.showNotice("Respond to the current storage permission request before saving another image.")
+            return
         }
+        pendingPermissions = pendingPermissions.requestGallery(image)
         storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     }
+
+    private companion object { const val PENDING_PERMISSIONS = "phone_studio_pending_permissions" }
 }

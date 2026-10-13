@@ -559,7 +559,7 @@ private fun ImageInformation(
                         DetailLine("Sampling", "${image.sampler}/${image.scheduler} · ${image.steps} steps")
                     }
                     if (image.cfg > 0f) DetailLine("Guidance", image.cfg.toString())
-                    DetailLine("Extras", if (image.speedExtras) "On" else "Off")
+                    DetailLine("Acceleration preference", if (image.speedExtras) "Requested on" else "Requested off")
                     if (image.lora.isNotBlank()) {
                         DetailLine("LoRA", image.lora)
                         DetailLine("Weight", image.loraStrength?.takeIf { it.isFinite() }?.toString() ?: "Not recorded")

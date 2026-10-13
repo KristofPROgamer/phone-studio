@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import app.phonestudio.data.remote.StudioHttp
+import app.phonestudio.data.model.ConnectionConfig
 import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -18,20 +19,20 @@ import okhttp3.Request
  *
  * The app previously had no way to keep an image: every library entry was a
  * remote `/view` URL that died with the Colab session, so the only copy lived in
- * Drive. Credentials are added by the shared client's auth interceptor, so this
- * needs no knowledge of which backend produced the file.
+ * Drive. The selected connection is captured before the download, keeping its
+ * credentials together with the image URL even if saved settings change.
  */
 class ImageExporter(private val context: Context, private val http: StudioHttp) {
 
-    suspend fun saveToGallery(url: String, displayName: String): Result<String> =
+    suspend fun saveToGallery(config: ConnectionConfig, url: String, displayName: String): Result<String> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val request = Request.Builder().url(url).get().build()
+                val request = StudioHttp.authenticated(Request.Builder().url(url).get(), config).build()
                 val bytes = http.images.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IOException("The backend returned ${response.code} for this image.")
                     }
-                    response.body?.bytes() ?: throw IOException("That image came back empty.")
+                    response.body?.let { StudioHttp.readBoundedImage(it) } ?: throw IOException("That image came back empty.")
                 }
                 write(bytes, sanitize(displayName))
             }

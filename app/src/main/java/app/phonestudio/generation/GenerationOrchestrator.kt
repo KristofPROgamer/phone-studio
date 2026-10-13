@@ -10,6 +10,7 @@ import app.phonestudio.data.model.GenerationParameters
 import app.phonestudio.data.model.Seeds
 import app.phonestudio.data.model.EditDraft
 import app.phonestudio.data.remote.RouterApi
+import app.phonestudio.data.remote.ApiException
 import app.phonestudio.data.remote.ComfyApi
 import app.phonestudio.data.remote.ComfyEventStream
 import java.util.UUID
@@ -67,16 +68,26 @@ class GenerationOrchestrator(
     }
 
     /** Re-runs only the targets that failed or were skipped, keeping their seeds. */
-    fun retryBatch(batch: GenerationBatch): GenerationBatch = if (batch.transport == "router") batch.copy(
+    fun retryBatch(batch: GenerationBatch): GenerationBatch = retryStoredBatch(batch)
+
+    companion object {
+        const val BATCH_TIMEOUT_MS = 10 * 60 * 1_000L
+        const val ROUTER_TIMEOUT_MS = 30 * 60 * 1_000L
+
+    internal fun retryStoredBatch(batch: GenerationBatch): GenerationBatch = if (batch.transport == "router") batch.copy(
         batchId = UUID.randomUUID().toString(), createdAtMillis = System.currentTimeMillis(),
         routerRetry = batch.targets.single().promptId != null,
+        routerRetryRequestId = if (batch.routerRetry) batch.routerRetryRequestId ?: batch.batchId
+            else if (batch.targets.single().promptId != null) UUID.randomUUID().toString() else null,
         targets = batch.targets.map { it.copy(state = BackendRunState.PENDING, failureReason = null, finishedAtMillis = 0) }
     ) else batch.copy(
         batchId = UUID.randomUUID().toString(),
         createdAtMillis = System.currentTimeMillis(),
         targets = batch.targets.map { job ->
             if (job.state == BackendRunState.FAILED || job.state == BackendRunState.SKIPPED) {
-                job.copy(
+                if (job.recoveryRequired) job.copy(state = BackendRunState.PENDING, message = "Recovering accepted render",
+                    failureReason = null, finishedAtMillis = 0L)
+                else job.copy(
                     state = BackendRunState.PENDING,
                     message = "Waiting",
                     failureReason = null,
@@ -94,6 +105,7 @@ class GenerationOrchestrator(
             }
         }
     )
+    }
 
     /**
      * Runs every non-terminal target at once.
@@ -149,21 +161,11 @@ class GenerationOrchestrator(
         }
     }
 
-    companion object {
-        const val BATCH_TIMEOUT_MS = 10 * 60 * 1_000L
-        const val ROUTER_TIMEOUT_MS = 30 * 60 * 1_000L
-    }
-
     suspend fun cancelRouter(stopped: GenerationBatch? = store.current()) {
         val batch = stopped?.takeIf { it.transport == "router" } ?: return
         val job = batch.targets.single()
-        val config = connections.byId(job.connectionId) ?: return
-        val snapshot = job.promptId?.let { router.cancel(config, it) }
-            ?: router.recover(config, batch.clientId, job.requestId)?.let { router.cancel(config, it.jobId) }
-        store.updateJob(batch.batchId, config.id, true) {
-            it.copy(state = if (it.images.isEmpty()) BackendRunState.SKIPPED else BackendRunState.COMPLETE,
-                message = "Stopped", routerState = "cancelled", promptId = snapshot?.jobId ?: it.promptId,
-                failureReason = "Stopped by you", finishedAtMillis = System.currentTimeMillis())
-        }
+        val config = connections.byId(job.connectionId)
+            ?: throw ApiException("Cancellation could not be confirmed. Restore the saved router connection and recover this request.")
+        RouterRunner(router, store, batch.batchId, {}).cancel(config, batch)
     }
 }

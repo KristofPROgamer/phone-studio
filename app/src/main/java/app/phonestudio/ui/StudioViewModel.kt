@@ -9,6 +9,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import app.phonestudio.core.AppContainer
 import app.phonestudio.data.local.AppPreferences
+import app.phonestudio.data.local.BatchStorageException
 import app.phonestudio.data.model.ConnectionConfig
 import app.phonestudio.data.model.ConnectionState
 import app.phonestudio.data.model.ConnectionStatus
@@ -173,8 +174,8 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun removeConnection(id: String) {
-        if (ConnectionUpdates.activeIn(id, batchStore.current())) {
-            showNotice("Wait for the render to finish, or stop it before removing this connection.")
+        if (ConnectionUpdates.activeIn(id, batchStore.current()) || batchStore.current()?.job(id)?.recoveryRequired == true) {
+            showNotice("Recover the saved render or confirm cancellation before removing this connection.")
             return
         }
         connectionChecks.remove(id)?.cancel()
@@ -193,8 +194,8 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun setConnectionEnabled(id: String, enabled: Boolean) {
-        if (!enabled && ConnectionUpdates.activeIn(id, batchStore.current())) {
-            showNotice("Wait for the render to finish, or stop it before disconnecting.")
+        if (!enabled && (ConnectionUpdates.activeIn(id, batchStore.current()) || batchStore.current()?.job(id)?.recoveryRequired == true)) {
+            showNotice("Recover the saved render or confirm cancellation before disconnecting.")
             return
         }
         connectionChecks.remove(id)?.cancel()
@@ -206,14 +207,18 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun forgetEverything() {
+        if (batchStore.current()?.blocksNewWork == true) {
+            showNotice("Recover the saved render or confirm cancellation before forgetting its recovery details.")
+            return
+        }
+        try { batchStore.clear() }
+        catch (error: BatchStorageException) { showNotice(error.message.orEmpty()); return }
         connectionChecks.values.forEach { it.cancel() }
         connectionChecks.clear()
         modelRefresh?.cancel()
         modelDownload?.cancel()
         editEpoch += 1
         val files = container.editFiles.savedFiles()
-        GenerationService.cancel(container.appContext)
-        batchStore.clear()
         connections.clearAll()
         preferences.clearAll()
         viewModelScope.launch { container.editFiles.clear(files) }
@@ -253,7 +258,9 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
                     ready to catalogRequest.await()
                 }
                 currentCoroutineContext().ensureActive()
-                if (!isCurrentConnection(config)) return@launch
+                if (!isCurrentConnection(config)) {
+                    return@launch
+                }
                 val catalog = catalogResult.getOrNull()
 
                 setStatus(
@@ -311,7 +318,9 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
                         val catalog = try { api.listModels(config) }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { return@async false }
-                        if (!isCurrentConnection(config)) return@async false
+                        if (!isCurrentConnection(config)) {
+                            return@async false
+                        }
                         val existing = _state.value.backends
                             .firstOrNull { it.config.id == config.id }
                             ?.status
@@ -342,8 +351,8 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
         val snapshot = _state.value
         val parameters = snapshot.parameters
 
-        if (batchStore.current()?.isActive == true) {
-            _state.update { it.copy(notice = "A render is already running.") }
+        if (batchStore.current()?.blocksNewWork == true) {
+            _state.update { it.copy(notice = "Recover the saved render or confirm cancellation before starting a new one.") }
             return
         }
         val targets = connections.renderTargets()
@@ -372,6 +381,12 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
             try {
                 val prepared = edit?.copy(maskPath = container.editFiles.mask(edit), maskAssetId = null)
                 if (epoch != editEpoch) { prepared?.maskPath?.takeIf { it.isNotBlank() }?.let { File(it).delete() }; return@launch }
+                // Mask preparation can suspend; recheck ownership before replacing the saved batch.
+                if (batchStore.current()?.blocksNewWork == true) {
+                    prepared?.maskPath?.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                    showNotice("Recover the saved render or confirm cancellation before starting a new one.")
+                    return@launch
+                }
                 val batch = container.orchestrator.createBatch(parameters, preferences.clientId(), targets, prepared)
                 GenerationTiming.start(batch, tappedAt)
                 batchStore.commit(batch)
@@ -398,7 +413,8 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
         if (batch.unsuccessful.isEmpty()) return
         val retry = container.orchestrator.retryBatch(batch)
         GenerationTiming.start(retry, tappedAt)
-        batchStore.commit(retry)
+        try { batchStore.commit(retry) }
+        catch (error: BatchStorageException) { showNotice(error.message.orEmpty()); return }
         GenerationService.start(container.appContext)
     }
 
@@ -441,13 +457,15 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun editImage(image: GeneratedImage) {
-        val url = imageUrl(image) ?: run { showNotice("Reconnect this image's saved connection to load the source."); return }
+        val config = connections.byId(image.connectionId) ?: run { showNotice("Reconnect this image's saved connection to load the source."); return }
+        val url = image.routerAssetId?.let { container.router.assetUrl(config, it) } ?: api.viewUrl(config, image.descriptor)
+            ?: run { showNotice("Reconnect this image's saved connection to load the source."); return }
         val epoch = ++editEpoch
         viewModelScope.launch {
             _state.update { it.copy(isPreparingEdit = true, tab = StudioTab.CREATE) }
             val raw = container.editFiles.newFile(".source")
             try {
-                container.router.copyImage(url, raw)
+                container.router.copyImage(config, url, raw)
                 val saved = _state.value.editDraft
                 var draft = container.editFiles.normalize(raw).copy(sourcePrompt = image.prompt,
                     instruction = saved.instruction, preservation = saved.preservation)
@@ -486,14 +504,15 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun saveToGallery(image: GeneratedImage) {
-        val url = imageUrl(image)
+        val config = connections.byId(image.connectionId)
+        val url = config?.let { saved -> image.routerAssetId?.let { container.router.assetUrl(saved, it) } ?: api.viewUrl(saved, image.descriptor) }
         if (url == null) {
             _state.update { it.copy(notice = "That backend is no longer saved, so the file cannot be fetched.") }
             return
         }
         viewModelScope.launch {
             _state.update { it.copy(notice = "Saving…") }
-            val result = container.imageExporter.saveToGallery(url, image.descriptor.filename)
+            val result = container.imageExporter.saveToGallery(config, url, image.descriptor.filename)
             _state.update { current ->
                 current.copy(
                     notice = result.fold(

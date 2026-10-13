@@ -12,6 +12,7 @@ import pytest
 
 from tools import edit_worker_setup as editing
 from tools import worker_runtime_setup as worker
+from tools import connection_pairing as pairing
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,6 +125,59 @@ def test_existing_private_credentials_are_not_overwritten_by_another_workers_sec
     assert worker.load_credentials(path, 'other-token', 'other-password') == ('other-token', 'other-password')
     assert json.loads(path.read_text()) == original
     assert worker.load_credentials(path) == ('saved-token', 'saved-password')
+
+
+@pytest.mark.parametrize('from_environment', [True, False])
+def test_saved_worker_secret_function_retains_opaque_bytes_and_other_config_trimming(monkeypatch, from_environment):
+    _, sources = notebook_sources()
+    node = next(n for n in ast.parse(sources[1]).body if isinstance(n, ast.FunctionDef) and n.name == 'colab_secret')
+    secrets = {'TUNNEL_PASSWORD': ' é-password ', 'PHONE_STUDIO_TOKEN': ' unsupported-token ',
+               'PHONE_STUDIO_WORKER_NAME': ' Worker 2 '}
+    environment = secrets if from_environment else {}
+    for key in secrets:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    namespace = {'os': os, 'userdata': types.SimpleNamespace(get=lambda name: secrets.get(name, ''))}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), '<saved-worker-secret>', 'exec'), namespace)
+    assert namespace['colab_secret']('TUNNEL_PASSWORD') == ' é-password '
+    assert namespace['colab_secret']('PHONE_STUDIO_TOKEN') == ' unsupported-token '
+    assert namespace['colab_secret']('PHONE_STUDIO_WORKER_NAME') == 'Worker 2'
+    with pytest.raises(RuntimeError, match='authenticated header'):
+        worker._credential_values(namespace['colab_secret']('PHONE_STUDIO_TOKEN'), namespace['colab_secret']('TUNNEL_PASSWORD'))
+
+
+def test_worker_credentials_keep_latin1_password_spaces_with_matching_basic_header(tmp_path):
+    path = tmp_path / 'credentials.json'
+    values = worker.load_credentials(path, 'valid-token', ' é-password ')
+    assert values == ('valid-token', ' é-password ')
+    assert worker.load_credentials(path) == values
+    assert pairing.validate_basic_credentials('studio', values[1]) == ('studio', ' é-password ')
+
+
+@pytest.mark.parametrize('token,password', [
+    (' unicode-é-marker', 'password'), ('valid-token', 'astral-😀-marker'),
+    ('valid-token', 'control-\x85-marker'), (' whitespace-marker ', 'password'),
+])
+def test_invalid_worker_credentials_never_create_or_replace_private_file(tmp_path, token, password):
+    path = tmp_path / 'credentials.json'
+    with pytest.raises(RuntimeError) as error:
+        worker.load_credentials(path, token, password)
+    assert 'marker' not in str(error.value) and not path.exists()
+    original = json.dumps({'phone_studio_token': token, 'tunnel_password': password}).encode()
+    path.write_bytes(original)
+    with pytest.raises(RuntimeError):
+        worker.load_credentials(path, 'valid-override', 'valid-password')
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize('invalid_json', ['null', '{}', '[]'])
+def test_existing_incomplete_worker_credential_files_are_preserved_and_rejected(tmp_path, invalid_json):
+    path = tmp_path / 'credentials.json'
+    path.write_text(invalid_json)
+    with pytest.raises(RuntimeError):
+        worker.load_credentials(path, 'valid-token', 'valid-password')
+    assert path.read_text() == invalid_json
     assert not list(tmp_path.glob('*.part')) and not list(tmp_path.glob('*.lock'))
 
 
