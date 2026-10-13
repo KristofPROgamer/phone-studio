@@ -1,0 +1,8 @@
+title = "Project publication scan with one reviewed integrity checksum"
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known upstream source SHA-256 in the Phone Studio T4 installer, also embedded verbatim in its notebooks."
+regexTarget = "secret"
+regexes = ['''^a00f82a9be15f56fdd2e688cc098525b9939b708873e678a64c8da8f941cc9f4$''']
