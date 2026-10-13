@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.net.Uri
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import app.phonestudio.core.AppContainer
@@ -54,23 +55,21 @@ class GenerationService : Service() {
         startForegroundCompat()
         latestStartId = startId
 
-        if (intent?.action == ACTION_CANCEL) {
-            val expected = intent.getStringExtra(EXPECTED_BATCH)
-            if (expected != null && container.batchStore.current()?.batchId != expected && runningBatchId != expected) {
-                return START_REDELIVER_INTENT // A delayed Stop must not cancel a newer render.
-            }
-            val original = container.batchStore.current()?.takeIf { expected == null || it.batchId == expected }
-            if (cancellation?.isActive == true && cancellingBatchId == original?.batchId) return START_NOT_STICKY
+        val currentBatch = container.batchStore.current()
+        if (intent?.action == ACTION_CANCEL &&
+            CancellationPolicy.targetsCurrent(intent.getStringExtra(EXPECTED_BATCH), currentBatch?.batchId, currentBatch?.blocksNewWork == true)) {
+            val original = requireNotNull(currentBatch)
+            if (cancellation?.isActive == true && cancellingBatchId == original.batchId) return START_NOT_STICKY
             val previousRunner = runner
             runningBatchId = null
             previousRunner?.cancel()
             runner = null
-            cancellingBatchId = original?.batchId
+            cancellingBatchId = original.batchId
             cancellation = serviceScope.launch(start = CoroutineStart.LAZY) {
                 previousRunner?.cancelAndJoin()
                 // A one-shot POST may have finished while cancellation waited.
-                val stopped = container.batchStore.current()?.takeIf { it.batchId == original?.batchId } ?: original
-                if (stopped?.transport == "router") {
+                val stopped = container.batchStore.current()?.takeIf { it.batchId == original.batchId } ?: original
+                if (stopped.blocksNewWork && stopped.transport == "router") {
                     try { container.orchestrator.cancelRouter(stopped) }
                     catch (_: BatchStorageException) {
                         stopped.targets.forEach { container.batchStore.failInMemory(stopped.batchId, it.connectionId) }
@@ -86,21 +85,21 @@ class GenerationService : Service() {
                             } } catch (_: BatchStorageException) { container.batchStore.failInMemory(stopped.batchId, job.connectionId) }
                         }
                     }
-                } else if (stopped != null && container.batchStore.current()?.batchId == stopped.batchId) {
-                    try { stopped.targets.forEach { job -> container.batchStore.updateJob(stopped.batchId, job.connectionId, true) {
-                        it.copy(state = if (it.images.isEmpty()) app.phonestudio.data.model.BackendRunState.SKIPPED else app.phonestudio.data.model.BackendRunState.COMPLETE,
-                            message = "Stopped waiting; accepted work remains saved",
-                            recoveryRequired = it.recoveryRequired || it.submissionAttempted || it.promptId != null,
-                            failureReason = "Stopped waiting; recover accepted work before submitting again.", finishedAtMillis = System.currentTimeMillis())
+                } else if (stopped.blocksNewWork && container.batchStore.current()?.batchId == stopped.batchId) {
+                    // Completed peers need no disk transition. A failed stop save
+                    // must not turn their finished results into unresolved work.
+                    val stopping = stopped.targets.filter(CancellationPolicy::needsLegacyStop)
+                    try { stopping.forEach { job -> container.batchStore.updateJob(stopped.batchId, job.connectionId, true) {
+                        CancellationPolicy.stoppedLegacyJob(it, System.currentTimeMillis())
                     } } }
-                    catch (_: BatchStorageException) { stopped.targets.forEach { container.batchStore.failInMemory(stopped.batchId, it.connectionId) } }
+                    catch (_: BatchStorageException) { stopping.forEach { container.batchStore.failInMemory(stopped.batchId, it.connectionId) } }
                 }
                 val owner = currentCoroutineContext()[Job]
                 withContext(Dispatchers.Main.immediate) {
                     if (cancellation === owner) {
                         cancellation = null
                         cancellingBatchId = null
-                        if (canFinishCancellation(runningBatchId, container.batchStore.current()?.batchId, stopped?.batchId)) {
+                        if (canFinishCancellation(runningBatchId, container.batchStore.current()?.batchId, stopped.batchId)) {
                             stopForeground(STOP_FOREGROUND_REMOVE)
                             notifications.clearProgress()
                             stopSelfResult(latestStartId)
@@ -112,6 +111,7 @@ class GenerationService : Service() {
             return START_NOT_STICKY
         }
 
+        // Stale or historical unbound Stops follow ordinary startup handling: resume the current active batch or stop an idle service.
         val batch = container.batchStore.current()
         if (cancellation?.isActive == true && cancellingBatchId == batch?.batchId) return START_NOT_STICKY
         if (batch == null || !batch.isActive) {
@@ -207,11 +207,16 @@ class GenerationService : Service() {
          * receives the action. stopService silently discards it.
          */
         fun cancel(context: Context) {
+            val batchId = context.studioContainer().batchStore.current()?.batchId?.takeIf { it.isNotBlank() } ?: return
             ContextCompat.startForegroundService(
                 context.applicationContext,
-                Intent(context.applicationContext, GenerationService::class.java).setAction(ACTION_CANCEL)
-                    .putExtra(EXPECTED_BATCH, context.studioContainer().batchStore.current()?.batchId)
+                cancelIntent(context.applicationContext, batchId)
             )
         }
+
+        internal fun cancelIntent(context: Context, batchId: String): Intent =
+            Intent(context.applicationContext, GenerationService::class.java).setAction(ACTION_CANCEL)
+                .putExtra(EXPECTED_BATCH, batchId)
+                .setData(Uri.parse(CancellationPolicy.pendingIntentIdentity(batchId)))
     }
 }

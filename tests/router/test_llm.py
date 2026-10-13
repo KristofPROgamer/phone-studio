@@ -8,6 +8,7 @@ import time
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
@@ -446,6 +447,129 @@ class LLMTests(unittest.IsolatedAsyncioTestCase):
             health = await client.health()
             self.assertTrue(health["ready"])
             self.assertEqual(health["inferenceStatus"], "succeeded")
+
+    async def test_numeric_overflow_is_safe_failed_validation_with_no_selected_candidate(self):
+        state = {"task": "plan"}
+
+        async def completion(_):
+            if state["task"] == "plan":
+                reply = self.plan_reply()
+                reply["denoise"] = 10 ** 400
+            else:
+                reply = self.review_reply()
+                reply["scores"][0]["quality"] = 10 ** 400
+            return web.json_response({"choices": [{"finish_reason": "stop", "message": {
+                "content": json.dumps(reply)}}]})
+
+        edit = {**self.request, "operation": "edit", "editInstruction": "replace the bird"}
+        async with self.local_server(completion) as client:
+            with self.assertRaises(LLMUnavailable) as error:
+                await client.plan_edit(edit, self.paths["asset-0"])
+            self.assertEqual(error.exception.category, "invalid_task_fields")
+            self.assertEqual(client._last_inference["status"], "failed")
+            self.assertEqual(client._last_inference["httpStatus"], 200)
+            self.assertEqual(client._last_inference["finishReason"], "stop")
+            state["task"] = "review"
+            result = await client.review(self.request, self.candidates, self.paths)
+            self.assertEqual(result["status"], "unavailable")
+            self.assertNotIn("winnerCandidateId", result)
+            self.assertEqual(client._last_inference["category"], "invalid_task_fields")
+            health = await client.health()
+            self.assertEqual(health["inferenceStatus"], "failed")
+            self.assertFalse(health["ready"])
+            self.assertTrue(health["processReady"])
+
+    async def test_recursive_json_reply_records_safe_failure_and_preserves_original_prompt(self):
+        state = {"outer": True}
+        nested = "[" * 3000 + "]" * 3000
+
+        async def completion(_):
+            if state["outer"]:
+                return web.Response(body=nested.encode(), content_type="application/json")
+            return web.json_response({"choices": [{"finish_reason": "stop", "message": {"content": nested}}]})
+
+        async with self.local_server(completion) as client:
+            for outer in (True, False):
+                state["outer"] = outer
+                with self.assertLogs("phone-studio-router.llm", level="INFO") as logs:
+                    result = await client.enhance(self.request)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertEqual(result["effectivePrompt"], self.request["originalPrompt"])
+                self.assertEqual(client._last_inference["status"], "failed")
+                self.assertEqual(client._last_inference["category"], "malformed_json")
+                self.assertEqual(client._last_inference["httpStatus"], 200)
+                self.assertNotIn(nested, " ".join(logs.output))
+                self.assertNotIn(self.request["originalPrompt"], " ".join(logs.output))
+                health = await client.health()
+                self.assertFalse(health["ready"])
+                self.assertEqual(health["inferenceStatus"], "failed")
+
+    async def test_expired_public_tasks_do_not_prepare_images_or_call_http(self):
+        expired = {**self.request, "deadlineMillis": int((time.time() - 1) * 1000)}
+        edit = {**expired, "operation": "edit", "sourceAssetId": "asset-0", "editInstruction": "replace the bird"}
+        with patch("router.llm._image_part") as image, patch.object(self.client, "_http") as http:
+            enhanced = await self.client.enhance(expired)
+            self.assertEqual(enhanced["status"], "unavailable")
+            with self.assertRaises(LLMUnavailable) as error:
+                await self.client.plan_edit(edit, self.paths["asset-0"])
+            self.assertEqual(error.exception.category, "inference_deadline")
+            reviewed = await self.client.review(edit, self.candidates, self.paths)
+            self.assertEqual(reviewed["status"], "unavailable")
+            self.assertNotIn("winnerCandidateId", reviewed)
+            image.assert_not_called()
+            http.assert_not_called()
+        self.assertEqual(self.client._last_inference["category"], "inference_deadline")
+
+    async def test_preparation_uses_call_budget_and_preserves_caller_cancellation(self):
+        edit = {**self.request, "operation": "edit", "editInstruction": "replace the bird"}
+
+        async def slow_prepare(*_args):
+            await asyncio.sleep(0.2)
+
+        with patch("router.llm.LLM_CALL_TIMEOUT_SECONDS", 0.02), \
+                patch("router.llm.asyncio.to_thread", side_effect=slow_prepare) as prepare, \
+                patch.object(self.client, "_http") as http:
+            with self.assertRaises(LLMUnavailable) as error:
+                await self.client.plan_edit(edit, self.paths["asset-0"])
+            self.assertEqual(error.exception.category, "inference_deadline")
+            self.assertEqual(prepare.call_count, 1)
+            http.assert_not_called()
+            self.assertEqual(self.client._last_inference["status"], "failed")
+        with patch("router.llm.asyncio.to_thread", side_effect=asyncio.CancelledError()):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.client.plan_edit(edit, self.paths["asset-0"])
+
+    async def test_elapsed_preparation_reduces_serial_wait_budget(self):
+        await self.client._slot.acquire()
+        try:
+            with patch.object(self.client, "_http") as http:
+                with self.assertRaises(LLMUnavailable) as error:
+                    await self.client._completion(self.request, "system", [], TAG_SCHEMA, 10,
+                        preparation_started=time.monotonic() - 179.98)
+                self.assertEqual(error.exception.category, "inference_deadline")
+                http.assert_not_called()
+                self.assertGreaterEqual(self.client._last_inference["preparationMillis"], 179_900)
+                self.assertEqual(self.client._last_inference["inferenceMillis"], 0)
+        finally:
+            self.client._slot.release()
+
+    async def test_review_checks_budget_between_images_before_starting_another_decode(self):
+        clock = [1000.0]
+        original_time = time.time
+
+        def prepare(_path):
+            clock[0] += 190.0  # Simulate elapsed image work without an expensive wait.
+            return {"type": "image_url", "image_url": {"url": "data:image/png;base64,aA=="}}
+
+        clock_source = SimpleNamespace(monotonic=lambda: clock[0], time=original_time)
+        with patch("router.llm.time", clock_source), patch("router.llm._image_part", side_effect=prepare) as image, \
+                patch.object(self.client, "_http") as http:
+            result = await self.client.review(self.request, self.candidates, self.paths)
+            self.assertEqual(result["status"], "unavailable")
+            self.assertNotIn("winnerCandidateId", result)
+            self.assertEqual(image.call_count, 1)
+            http.assert_not_called()
+            self.assertEqual(self.client._last_inference["category"], "inference_deadline")
 
 
 if __name__ == "__main__":

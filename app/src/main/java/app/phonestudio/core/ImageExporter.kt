@@ -50,12 +50,16 @@ class ImageExporter(private val context: Context, private val http: StudioHttp) 
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                 ?: throw IOException("The gallery would not accept a new image.")
 
-            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: throw IOException("Could not write into the gallery.")
-
-            values.clear()
-            values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+            GalleryWrites.writeOwned(
+                write = { resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: throw IOException("Could not write into the gallery.") },
+                publish = {
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null) > 0
+                },
+                discard = { resolver.delete(uri, null, null) }
+            )
             "Pictures/$ALBUM"
         } else {
             // Pre-Q needs a real file plus the legacy write permission, which the
@@ -68,8 +72,8 @@ class ImageExporter(private val context: Context, private val http: StudioHttp) 
             if (!albumDir.exists() && !albumDir.mkdirs()) {
                 throw IOException("Could not create the Phone Studio album.")
             }
-            val target = availableTarget(albumDir, name)
-            target.writeBytes(bytes)
+            val target = GalleryWrites.reserveFile(albumDir, name)
+            GalleryWrites.writeOwned(write = { target.writeBytes(bytes) }, publish = { true }, discard = { target.delete() })
             // Index the exact PNG we wrote. insertImage(path, ...) decodes and
             // creates another, recompressed gallery item on these API levels.
             MediaScannerConnection.scanFile(
@@ -79,21 +83,6 @@ class ImageExporter(private val context: Context, private val http: StudioHttp) 
                 null
             )
             "Pictures/$ALBUM"
-        }
-    }
-
-    private fun availableTarget(directory: File, requestedName: String): File {
-        val direct = File(directory, requestedName)
-        if (!direct.exists()) return direct
-
-        val extension = requestedName.substringAfterLast('.', missingDelimiterValue = "")
-        val stem = if (extension.isBlank()) requestedName else requestedName.removeSuffix(".$extension")
-        var index = 2
-        while (true) {
-            val suffix = if (extension.isBlank()) "_$index" else "_$index.$extension"
-            val candidate = File(directory, "$stem$suffix")
-            if (!candidate.exists()) return candidate
-            index += 1
         }
     }
 

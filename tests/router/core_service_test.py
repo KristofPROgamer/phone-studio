@@ -661,3 +661,240 @@ class RouterServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service.retry(saved["jobId"], "unsafe-retry")
         self.assertEqual(caught.exception.code, "submission_uncertain")
         self.assertEqual(self.workers.calls, [])
+
+
+    async def wait_for_job(self, job_id, predicate):
+        for _ in range(300):
+            saved = await self.service.get(job_id)
+            if predicate(saved):
+                return saved
+            await asyncio.sleep(0.01)
+        self.fail("Mock router stage did not reach the requested checkpoint")
+
+    async def test_cancel_caller_disconnect_keeps_one_owned_nonterminal_cancellation(self):
+        self.workers.gates = {worker.worker_id: asyncio.Event() for worker in self.config.workers}
+        accepted = await self.service.submit(self.body())
+        saved = await self.wait_for_job(accepted["jobId"],
+            lambda job: all(worker.get("promptId") for worker in job["workers"]))
+        entered, release = asyncio.Event(), asyncio.Event()
+        cancellations = []
+        async def blocking_cancel(worker, record):
+            cancellations.append(worker.worker_id)
+            entered.set()
+            await release.wait()
+            return True
+        self.workers.cancel = blocking_cancel
+        caller = asyncio.create_task(self.service.cancel(saved["jobId"]))
+        await asyncio.wait_for(entered.wait(), 2)
+        owned = self.service.cancel_tasks[saved["jobId"]]
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        pending = await self.service.status(saved["jobId"])
+        self.assertEqual(pending["state"], "cancelling")
+        self.assertTrue(all(worker["cancelRequested"] for worker in pending["workers"]))
+        with self.assertRaises(RouterError) as caught:
+            await self.service.retry(saved["jobId"], "premature-retry")
+        self.assertEqual(caught.exception.status, 409)
+        second_caller = asyncio.create_task(self.service.cancel(saved["jobId"]))
+        await asyncio.sleep(0)
+        self.assertIs(self.service.cancel_tasks[saved["jobId"]], owned)
+        release.set()
+        stopped = await asyncio.wait_for(second_caller, 3)
+        self.assertEqual(stopped["state"], "cancelled")
+        self.assertEqual(cancellations, ["w1", "w2", "w3"])
+        for old, worker in zip(saved["workers"], stopped["workers"]):
+            self.assertEqual(worker["state"], "cancelled")
+            self.assertTrue(worker["cancellationConfirmed"])
+            self.assertFalse(worker["resumeOnly"])
+            for key in ("promptId", "runtimeId", "requestId", "clientId", "renderMetadata"):
+                self.assertEqual(worker[key], old[key])
+        self.assertEqual(len(self.workers.calls), 3)
+
+    async def test_cancel_process_interruption_resumes_intent_and_retains_uncertain_acceptance(self):
+        self.workers.gates = {worker.worker_id: asyncio.Event() for worker in self.config.workers}
+        accepted = await self.service.submit(self.body())
+        saved = await self.wait_for_job(accepted["jobId"],
+            lambda job: all(worker.get("promptId") for worker in job["workers"]))
+        entered = asyncio.Event()
+        async def interrupted_cancel(worker, record):
+            entered.set()
+            await asyncio.Event().wait()
+        self.workers.cancel = interrupted_cancel
+        caller = asyncio.create_task(self.service.cancel(saved["jobId"]))
+        await asyncio.wait_for(entered.wait(), 2)
+        await self.service.close()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        restored_workers = FakeWorkers(self.config)
+        cancelled_ids = []
+        async def restored_cancel(worker, record):
+            cancelled_ids.append(worker.worker_id)
+            return worker.worker_id != "w2"
+        restored_workers.cancel = restored_cancel
+        self.workers = restored_workers
+        self.service = RouterService(self.config, workers=restored_workers, llm=FakeLLM())
+        await self.service.start()
+        stopped = await self.finished(saved["jobId"])
+        self.assertEqual(stopped["state"], "cancelled")
+        self.assertEqual(cancelled_ids, ["w1", "w2", "w3"])
+        self.assertEqual(stopped["workers"][1]["state"], "submission_uncertain")
+        self.assertFalse(stopped["workers"][1]["cancellationConfirmed"])
+        for old, worker in zip(saved["workers"], stopped["workers"]):
+            for key in ("promptId", "runtimeId", "requestId", "clientId", "renderMetadata"):
+                self.assertEqual(worker[key], old[key])
+        with self.assertRaises(RouterError) as caught:
+            await self.service.retry(saved["jobId"], "cannot-retry-unconfirmed-stop")
+        self.assertEqual(caught.exception.code, "submission_uncertain")
+        self.assertEqual(restored_workers.calls, [])
+
+    async def test_cancelling_phase_rejects_late_runner_publication(self):
+        original_schedule = self.service.schedule
+        self.service.schedule = lambda job_id: None
+        saved = await self.service.submit(self.body())
+        await self.service._record_cancellation(saved["jobId"])
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service._set_running_fields(saved["jobId"], state="dispatching")
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service._update_running(saved["jobId"],
+                lambda job: job.update(state="complete", candidates=[{"candidateId": "late"}]))
+        pending = await self.service.get(saved["jobId"])
+        self.assertEqual(pending["state"], "cancelling")
+        self.assertEqual(pending["candidates"], [])
+        self.service.schedule = original_schedule
+        stopped = await self.service.cancel(saved["jobId"])
+        self.assertEqual(stopped["state"], "cancelled")
+        self.assertEqual(self.workers.calls, [])
+
+    async def test_confirmed_cancel_retry_rotates_only_deleted_prompt_and_preserves_successful_peers(self):
+        self.workers.gates["w3"] = asyncio.Event()
+        accepted = await self.service.submit(self.body())
+        saved = await self.wait_for_job(accepted["jobId"],
+            lambda job: len(job["candidates"]) == 2 and bool(job["workers"][2].get("promptId")))
+        old_worker = copy.deepcopy(saved["workers"][2])
+        cancellations = []
+        async def confirmed_delete(worker, record):
+            cancellations.append((worker.worker_id, record["promptId"]))
+            return True
+        self.workers.cancel = confirmed_delete
+        stopped = await self.service.cancel(saved["jobId"])
+        self.assertEqual(stopped["workers"][:2], saved["workers"][:2])
+        self.assertEqual(stopped["candidates"], saved["candidates"])
+        self.assertEqual(cancellations, [("w3", old_worker["promptId"])])
+        self.assertFalse(stopped["workers"][2]["resumeOnly"])
+        self.workers.gates["w3"].set()
+        retried = await self.service.retry(saved["jobId"], "retry-confirmed-deletion")
+        self.assertFalse(retried["workers"][2]["submissionAttempted"])
+        self.assertIsNone(retried["workers"][2]["promptId"])
+        self.assertNotEqual(retried["workers"][2]["requestId"], old_worker["requestId"])
+        self.assertNotEqual(retried["workers"][2]["clientId"], old_worker["clientId"])
+        done = await self.finished(saved["jobId"])
+        self.assertEqual(done["state"], "complete")
+        self.assertEqual(done["workers"][:2], saved["workers"][:2])
+        self.assertCountEqual([call[0] for call in self.workers.calls], ["w1", "w2", "w3", "w3"])
+        self.assertTrue(self.workers.calls[-1][2])  # A deleted prompt gets a fresh graph on explicit retry.
+        self.assertTrue({candidate["assetId"] for candidate in saved["candidates"]} <=
+                        {candidate["assetId"] for candidate in done["candidates"]})
+        replay = await self.service.retry(saved["jobId"], "retry-confirmed-deletion")
+        self.assertEqual(replay["revision"], done["revision"])
+        self.assertEqual(len(self.workers.calls), 4)
+
+    async def test_legacy_confirmed_cancel_rotates_prompt_only_on_explicit_retry(self):
+        self.workers.failures["w3"] = WorkerFailure("Follow accepted output later", resume_only=True)
+        accepted = await self.service.submit(self.body())
+        partial = await self.finished(accepted["jobId"])
+        old_worker = copy.deepcopy(partial["workers"][2])
+        def legacy_cancel(job):
+            job["state"] = "cancelled"
+            job["workers"][2].update(state="cancelled", stage="Cancelled", resumeOnly=True)
+        await self.service.update(partial["jobId"], legacy_cancel)
+        self.workers.failures.clear()
+        legacy = await self.service.status(partial["jobId"])
+        self.assertEqual(legacy["workers"][2]["requestId"], old_worker["requestId"])
+        self.assertNotIn(partial["jobId"], self.service.cancel_tasks)
+        self.assertNotIn(partial["jobId"], self.service.tasks)
+        retried = await self.service.retry(partial["jobId"], "retry-legacy-confirmed-stop")
+        self.assertFalse(retried["workers"][2]["resumeOnly"])
+        self.assertNotEqual(retried["workers"][2]["requestId"], old_worker["requestId"])
+        done = await self.finished(partial["jobId"])
+        self.assertEqual(done["state"], "complete")
+        self.assertTrue(self.workers.calls[-1][2])
+        self.assertEqual(len(self.workers.calls), 4)
+
+    async def test_status_and_request_recovery_schedule_same_acceptance_after_backup_failure_once(self):
+        for lookup in ("status", "recover"):
+            with self.subTest(lookup=lookup):
+                body = self.body(requestId="backup-failure-" + lookup)
+                with patch.object(self.service.journal, "_backup", side_effect=OSError("Unavailable test Drive")):
+                    with self.assertRaises(OSError):
+                        await self.service.submit(body)
+                    saved = self.service.journal.recover(body["clientId"], body["requestId"])
+                    self.assertEqual(saved["state"], "accepted")
+                    self.assertNotIn(saved["jobId"], self.service.tasks)
+                    with self.assertRaises(OSError):
+                        await self.service.status(saved["jobId"])
+                    self.assertNotIn(saved["jobId"], self.service.tasks)
+                original = self.service._run_guarded
+                run_gate, entered = asyncio.Event(), asyncio.Event()
+                scheduled = []
+                async def wait_before_running(job_id):
+                    scheduled.append(job_id)
+                    entered.set()
+                    await run_gate.wait()
+                    await original(job_id)
+                self.service._run_guarded = wait_before_running
+                with patch.object(self.service.journal, "_backup", wraps=self.service.journal._backup) as backup:
+                    recovered = (await self.service.status(saved["jobId"]) if lookup == "status" else
+                                 await self.service.recover(body["clientId"], body["requestId"]))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    owned = self.service.tasks[saved["jobId"]]
+                    again = await self.service.status(saved["jobId"])
+                    mapped = await self.service.recover(body["clientId"], body["requestId"])
+                    self.assertEqual(recovered["jobId"], saved["jobId"])
+                    self.assertEqual(again, mapped)
+                    self.assertEqual(mapped["workers"], saved["workers"])
+                    self.assertIs(self.service.tasks[saved["jobId"]], owned)
+                    self.assertEqual(scheduled, [saved["jobId"]])
+                    self.assertEqual(backup.call_count, 1)
+                run_gate.set()
+                done = await self.finished(saved["jobId"])
+                self.assertEqual(done["state"], "complete")
+                self.assertEqual(len(done["candidates"]), 3)
+                self.service._run_guarded = original
+        self.assertEqual(len(self.workers.calls), 6)
+
+
+    async def test_shutdown_while_cancel_waits_for_runner_retains_durable_intent(self):
+        running, stopping = asyncio.Event(), asyncio.Event()
+        async def slow_runner(job_id):
+            running.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                stopping.set()
+                await asyncio.Event().wait()  # Shutdown interrupts this final owned cleanup.
+                raise
+        self.service._run_guarded = slow_runner
+        saved = await self.service.submit(self.body())
+        await asyncio.wait_for(running.wait(), 2)
+        cancelled_workers = []
+        async def should_not_cancel_worker(worker, record):
+            cancelled_workers.append(worker.worker_id)
+            return True
+        self.workers.cancel = should_not_cancel_worker
+        caller = asyncio.create_task(self.service.cancel(saved["jobId"]))
+        await asyncio.wait_for(stopping.wait(), 2)
+        await asyncio.wait_for(self.service.close(), 3)
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        restored_workers = FakeWorkers(self.config)
+        self.service = RouterService(self.config, workers=restored_workers, llm=FakeLLM())
+        pending = await self.service.get(saved["jobId"])
+        self.assertEqual(pending["state"], "cancelling")
+        self.assertTrue(all(worker["cancelRequested"] for worker in pending["workers"]))
+        self.assertEqual(cancelled_workers, [])
+        await self.service.start()
+        stopped = await self.finished(saved["jobId"])
+        self.assertEqual(stopped["state"], "cancelled")
+        self.assertTrue(all(worker["cancellationConfirmed"] for worker in stopped["workers"]))
+        self.assertEqual(restored_workers.calls, [])

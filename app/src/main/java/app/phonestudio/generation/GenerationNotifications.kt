@@ -55,7 +55,10 @@ class GenerationNotifications(private val context: Context) {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setContentIntent(openApp(REQUEST_OPEN))
-            .addAction(0, "Stop", cancelGeneration())
+
+        batch?.takeIf { it.blocksNewWork }?.batchId?.takeIf { it.isNotBlank() }?.let { id ->
+            builder.addAction(0, "Stop", cancelGeneration(id))
+        }
 
         if (total > 0) builder.setProgress(total, finished, finished == 0 && lines.isNotEmpty())
 
@@ -134,10 +137,10 @@ class GenerationNotifications(private val context: Context) {
      * The previous build routed cancellation through stopService with an action
      * set on the intent, which Android ignores, so its cancel branch was dead.
      */
-    private fun cancelGeneration(): PendingIntent = PendingIntent.getForegroundService(
+    private fun cancelGeneration(batchId: String): PendingIntent = PendingIntent.getForegroundService(
         context,
         REQUEST_CANCEL,
-        Intent(context, GenerationService::class.java).setAction(GenerationService.ACTION_CANCEL),
+        GenerationService.cancelIntent(context, batchId),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 

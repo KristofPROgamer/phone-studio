@@ -178,10 +178,11 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
             showNotice("Recover the saved render or confirm cancellation before removing this connection.")
             return
         }
-        connectionChecks.remove(id)?.cancel()
         val wasRouter = connections.byId(id)?.isRouter == true
         val name = connections.byId(id)?.displayName ?: "Backend"
-        connections.remove(id)
+        try { connections.remove(id) }
+        catch (_: Exception) { showNotice("This connection could not be removed. Check available device storage and try again."); return }
+        connectionChecks.remove(id)?.cancel()
         preferences.forgetWarmUp(id)
         _state.update { current ->
             current.copy(
@@ -198,8 +199,9 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
             showNotice("Recover the saved render or confirm cancellation before disconnecting.")
             return
         }
+        try { connections.setEnabled(id, enabled) }
+        catch (_: Exception) { showNotice("This connection could not be updated. Check available device storage and try again."); return }
         connectionChecks.remove(id)?.cancel()
-        connections.setEnabled(id, enabled)
         if (!enabled && connections.byId(id)?.isRouter == true) {
             _state.update { it.copy(routerWorkers = emptyList()) }
         }
@@ -213,13 +215,14 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
         }
         try { batchStore.clear() }
         catch (error: BatchStorageException) { showNotice(error.message.orEmpty()); return }
+        try { connections.clearAll() }
+        catch (_: Exception) { showNotice("Saved connections could not be forgotten. Check available device storage and try again."); return }
         connectionChecks.values.forEach { it.cancel() }
         connectionChecks.clear()
         modelRefresh?.cancel()
         modelDownload?.cancel()
         editEpoch += 1
         val files = container.editFiles.savedFiles()
-        connections.clearAll()
         preferences.clearAll()
         viewModelScope.launch { container.editFiles.clear(files) }
         mergedImageIds = mutableSetOf()
@@ -654,7 +657,7 @@ class StudioViewModel(private val container: AppContainer) : ViewModel() {
         if (config.isRouter) return // Worker notebook startup owns its model warm-up.
         val parameters = _state.value.parameters
         if (parameters.model.isBlank()) return
-        if (batchStore.current()?.isActive == true) return
+        if (batchStore.current()?.blocksNewWork == true) return
         if (!warmUpsInFlight.add(config.id)) return
         try {
             val completed = health.completedWarmup

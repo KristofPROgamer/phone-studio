@@ -1,5 +1,7 @@
 # Phone Studio 0.3.1 follow-up audit — 9 October 2026
 
+This record describes the frozen 0.3.1 checkpoint. Current repairs and evidence are in [SECOND_AUDIT.md](SECOND_AUDIT.md).
+
 This update completes the interrupted local audit. Install **PhoneStudio-0.3.1-debug.apk** over the existing app, keeping its data. Application ID remains `app.phonestudio`; version code is **4**, with the same signing certificate. The preceding 0.3.0 delivery remains frozen.
 
 ## Confirmed issues repaired

@@ -5,6 +5,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
@@ -125,3 +126,24 @@ class RouterApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await replay.json(), snapshot)
         unsafe = await self.client.post(path, json={}, headers=self.headers)
         self.assertEqual(unsafe.status, 409)
+
+
+    async def test_http_status_and_request_routes_restore_pending_durability_and_schedule_saved_id(self):
+        with patch.object(self.service.journal, "_backup", side_effect=OSError("Unavailable test Drive")):
+            response = await self.client.post("/phone-studio/v2/jobs", json=self.body(), headers=self.headers)
+            self.assertEqual(response.status, 500)
+            self.assertNotIn("Unavailable test Drive", str(await response.json()))
+            saved = self.service.journal.recover("phone", "request-1")
+            lookup = await self.client.get("/phone-studio/v2/requests/request-1?clientId=phone", headers=self.headers)
+            self.assertEqual(lookup.status, 500)
+        scheduled = []
+        self.service.schedule = scheduled.append
+        with patch.object(self.service.journal, "_backup", wraps=self.service.journal._backup) as backup:
+            response = await self.client.get("/phone-studio/v2/requests/request-1?clientId=phone", headers=self.headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), saved)
+            status = await self.client.get("/phone-studio/v2/jobs/" + saved["jobId"], headers=self.headers)
+            self.assertEqual(status.status, 200)
+            self.assertEqual(await status.json(), saved)
+            self.assertEqual(scheduled, [saved["jobId"], saved["jobId"]])
+            self.assertEqual(backup.call_count, 1)

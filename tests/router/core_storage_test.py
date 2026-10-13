@@ -153,3 +153,67 @@ def test_bad_upload_mask_kind_quota_and_animation(tmp_path):
             assert opened.mode == "L"
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("lookup", ["get", "recover"])
+def test_failed_persistent_copy_recovers_original_row_once_before_durable_read(tmp_path, monkeypatch, lookup):
+    config = settings(tmp_path)
+    journal = Journal(config.root, config.drive)
+    real_backup = journal._backup
+    calls = []
+    def unavailable_copy():
+        raise OSError("Temporary test Drive outage")
+    monkeypatch.setattr(journal, "_backup", unavailable_copy)
+    try:
+        body = validate_request(request())
+        with pytest.raises(OSError):
+            journal.create_job(body, [], 900)
+        saved = journal.recover(body["clientId"], body["requestId"])
+        with pytest.raises(OSError):
+            journal.get(saved["jobId"], durable=True)
+        def successful_copy():
+            calls.append(True)
+            real_backup()
+        monkeypatch.setattr(journal, "_backup", successful_copy)
+        recovered = (journal.get(saved["jobId"], durable=True) if lookup == "get" else
+                     journal.recover(body["clientId"], body["requestId"], durable=True))
+        assert recovered == saved
+        assert journal.get(saved["jobId"], durable=True) == saved
+        assert journal.recover(body["clientId"], body["requestId"], durable=True) == saved
+        replay, created = journal.create_job(body, [], 900)
+        assert not created and replay == saved
+        assert len(calls) == 1
+        restored = Journal(tmp_path / "recovered-local", config.drive)
+        try:
+            assert restored.recover(body["clientId"], body["requestId"]) == saved
+        finally:
+            restored.close()
+    finally:
+        monkeypatch.setattr(journal, "_backup", real_backup)
+        journal.close()
+
+
+def test_retry_backup_failure_keeps_atomic_action_and_read_replay(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    journal = Journal(config.root, config.drive)
+    real_backup = journal._backup
+    try:
+        saved, _ = journal.create_job(validate_request(request()), [], 900)
+        def unavailable_copy():
+            raise OSError("Temporary test Drive outage")
+        monkeypatch.setattr(journal, "_backup", unavailable_copy)
+        with pytest.raises(OSError):
+            journal.retry(saved["jobId"], "retry-durable", lambda job: job.update(state="dispatching"))
+        calls = []
+        def successful_copy():
+            calls.append(True)
+            real_backup()
+        monkeypatch.setattr(journal, "_backup", successful_copy)
+        retried, created = journal.retry(saved["jobId"], "retry-durable", lambda job: pytest.fail("Repeated retry mutated acceptance"))
+        assert not created and retried["revision"] == 2
+        assert retried["state"] == "dispatching"
+        again, created = journal.retry(saved["jobId"], "retry-durable", lambda job: pytest.fail("Repeated retry mutated acceptance"))
+        assert not created and again == retried and len(calls) == 1
+    finally:
+        monkeypatch.setattr(journal, "_backup", real_backup)
+        journal.close()

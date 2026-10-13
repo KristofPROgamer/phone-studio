@@ -1,6 +1,6 @@
 # Current app and recovery verification — 2026-10-09
 
-Current 0.3.1 audit fixes, rebuilt APK and fresh local evidence are in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). The UI/pairing update is described in [APP_REFRESH.md](APP_REFRESH.md). The preceding backend repair is recorded in [RECOVERY_VERIFICATION.md](RECOVERY_VERIFICATION.md). Exact runtime startup: [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md). The records below concern the earlier October 1 delivery; their notebook/APK hashes do not identify the current artifacts. No live device/GPU result is claimed.
+Current 0.3.2 audit fixes, rebuilt APK and fresh local evidence are in [SECOND_AUDIT.md](SECOND_AUDIT.md). The previous audit is recorded in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). The UI/pairing update is described in [APP_REFRESH.md](APP_REFRESH.md). The preceding backend repair is recorded in [RECOVERY_VERIFICATION.md](RECOVERY_VERIFICATION.md). Exact runtime startup: [RECOVERY_STARTUP.md](RECOVERY_STARTUP.md). The records below concern the earlier October 1 delivery; their notebook/APK hashes do not identify the current artifacts. No live device/GPU result is claimed.
 
 ## Historical delivery evidence
 

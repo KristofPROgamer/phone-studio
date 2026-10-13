@@ -34,6 +34,7 @@ class Journal:
         self.root.mkdir(parents=True, exist_ok=True)
         self.drive.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._backup_needed = False
         # The OS lock prevents two local router processes sharing a journal.
         self._lock_handle = (self.root / "router.lock").open("a+b")
         try:
@@ -71,8 +72,13 @@ class Journal:
         if not row:
             self.db.execute("INSERT INTO meta VALUES ('studioId',?)", (self.studio_id,))
             self._backup()
+        else:
+            # A previous local process may have committed before its Drive copy
+            # failed. Re-establish that checkpoint before public recovery.
+            self._backup_needed = True
 
     def _backup(self):
+        self._backup_needed = True
         # SQLite backup includes committed WAL data without copying live sidecars.
         scratch = self.root / "journal.snapshot.sqlite3"
         with contextlib.closing(sqlite3.connect(scratch)) as dest:
@@ -85,6 +91,7 @@ class Journal:
             shutil.copyfileobj(source, target)
             target.flush(); os.fsync(target.fileno())
         os.replace(temporary, self.drive / "journal.sqlite3")
+        self._backup_needed = False
 
     def create_job(self, request: dict, workers: list[dict], timeout_seconds: int):
         with self._lock:
@@ -94,7 +101,8 @@ class Journal:
             if row:
                 if row[0] != fingerprint:
                     raise RouterError("This request ID already belongs to different settings.", 409, "request_conflict")
-                self._backup()  # Also retries a previously failed persistent write.
+                if self._backup_needed:
+                    self._backup()  # Retry a failed copy without rewriting each replay.
                 return json.loads(row[1]), False
             stamp = now_ms()
             job = copy.deepcopy(request)
@@ -105,21 +113,26 @@ class Journal:
                        selection={"status": "pending", "winnerCandidateId": None, "reason": "", "scores": [],
                                   "reviewerModel": "", "reviewerRevision": ""})
             self.db.execute("INSERT INTO jobs VALUES (?,?,?,?,?)", (job["jobId"], request["clientId"], request["requestId"], fingerprint, canonical(job)))
+            self._backup_needed = True
             self._backup()
             return job, True
 
-    def get(self, job_id: str):
+    def get(self, job_id: str, durable=False):
         with self._lock:
             row = self.db.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise RouterError("That router job is not in this studio.", 404, "not_found")
+            if durable and self._backup_needed:
+                self._backup()
             return json.loads(row[0])
 
-    def recover(self, client_id: str, request_id: str):
+    def recover(self, client_id: str, request_id: str, durable=False):
         with self._lock:
             row = self.db.execute("SELECT payload FROM jobs WHERE client=? AND request=?", (client_id, request_id)).fetchone()
             if not row:
                 raise RouterError("No accepted job has that client/request ID.", 404, "not_found")
+            if durable and self._backup_needed:
+                self._backup()
             return json.loads(row[0])
 
     def update(self, job_id: str, transform, durable=True):
@@ -130,6 +143,7 @@ class Journal:
             job["updatedAtMillis"] = now_ms()
             self.db.execute("UPDATE jobs SET payload=? WHERE id=?", (canonical(job), job_id))
             if durable:
+                self._backup_needed = True
                 self._backup()
             return job
 
@@ -151,11 +165,13 @@ class Journal:
     def put_asset(self, asset):
         with self._lock:
             self.db.execute("INSERT OR REPLACE INTO assets VALUES (?,?)", (asset["assetId"], canonical(asset)))
+            self._backup_needed = True
             self._backup()
 
     def put_download(self, download):
         with self._lock:
             self.db.execute("INSERT OR REPLACE INTO downloads VALUES (?,?)", (download["jobId"], canonical(download)))
+            self._backup_needed = True
             self._backup()
 
     def download(self, download_id):
@@ -170,7 +186,8 @@ class Journal:
         with self._lock:
             job = self.get(job_id)
             if request_id is not None and self.db.execute("SELECT 1 FROM actions WHERE job=? AND request=?", (job_id, request_id)).fetchone():
-                self._backup()
+                if self._backup_needed:
+                    self._backup()
                 return job, False
             transform(job)
             job["revision"] += 1
@@ -184,6 +201,7 @@ class Journal:
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+            self._backup_needed = True
             self._backup()
             return job, True
 

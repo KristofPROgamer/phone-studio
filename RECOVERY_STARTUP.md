@@ -1,8 +1,8 @@
 # Repaired baseline and easier setup — 9 October 2026
 
-Use the updated **PHONE_STUDIO_COLAB.ipynb** and **PHONE_STUDIO_ROUTER_COLAB.ipynb** in this workspace. Upload the cleared files into fresh notebook copies; older open copies can retain stale cells, imports and variables. The original repair record is `RECOVERY_VERIFICATION.md`; the app/pairing changes are in [APP_REFRESH.md](APP_REFRESH.md), and current follow-up evidence is in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). GPU inference and phone operation remain pending until the sequence below passes.
+Use the updated **PHONE_STUDIO_COLAB.ipynb** and **PHONE_STUDIO_ROUTER_COLAB.ipynb** in this workspace. Upload the cleared files into fresh notebook copies; older open copies can retain stale cells, imports and variables. The original repair record is `RECOVERY_VERIFICATION.md`; the app/pairing changes are in [APP_REFRESH.md](APP_REFRESH.md), and current follow-up evidence is in [SECOND_AUDIT.md](SECOND_AUDIT.md). GPU inference and phone operation remain pending until the sequence below passes.
 
-The protocol, checkpoint, LoRAs, 24/18-step presets, canvases, seeds, negatives, saved data and accepted-job recovery remain the same. Install the rebuilt **0.3.1/code 4 APK as an update** to use QR scanning and the refreshed UI; keep the same app data and existing credentials. Older apps retain manual connection support. Password spaces are significant. Existing Basic authentication supports Latin-1 visible text; unsupported characters fail with a safe error and preserve saved files. Generated credentials use ASCII.
+The protocol, checkpoint, LoRAs, 24/18-step presets, canvases, seeds, negatives, saved data and accepted-job recovery remain the same. Install the rebuilt **0.3.2/code 5 APK as an update** to use QR scanning and the refreshed UI; keep the same app data and existing credentials. Older apps retain manual connection support. Password spaces are significant. Existing Basic authentication supports Latin-1 visible text; unsupported characters fail with a safe error and preserve saved files. Generated credentials use ASCII.
 
 ## Start one worker, then the assistant
 

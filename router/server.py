@@ -103,13 +103,13 @@ def create_app(config: Config, service=None):
 
     @routes.get("/phone-studio/v2/jobs/{jobId}")
     async def job(request):
-        return web.json_response(await service.get(request.match_info["jobId"]))
+        return web.json_response(await service.status(request.match_info["jobId"]))
 
     @routes.get("/phone-studio/v2/requests/{requestId}")
     async def recovery(request):
         client = identifier(request.query.get("clientId"), "Client ID")
         request_id = identifier(request.match_info["requestId"], "Request ID")
-        return web.json_response(await asyncio.to_thread(service.journal.recover, client, request_id))
+        return web.json_response(await service.recover(client, request_id))
 
     @routes.post("/phone-studio/v2/jobs/{jobId}/cancel")
     async def cancel(request):

@@ -96,7 +96,7 @@ def test_notebook_preserves_identity_and_embeds_current_helper_and_speed_policy(
     # tests/router → root is two parents above router directory.
     root = root.parent if not (root / "PHONE_STUDIO_COLAB.ipynb").exists() else root
     current = json.loads((root / "PHONE_STUDIO_COLAB.ipynb").read_text(encoding="utf-8"))
-    previous = json.loads((root / ".work-router/original/PHONE_STUDIO_COLAB.ipynb").read_text(encoding="utf-8"))
+    previous = json.loads((root / "tests/fixtures/ORIGINAL_PHONE_STUDIO_COLAB.ipynb").read_text(encoding="utf-8"))
     assert [(c.get("id"), c["cell_type"]) for c in current["cells"]] == [(c.get("id"), c["cell_type"]) for c in previous["cells"]]
     assert len(current["cells"]) == 7
     assignments = {}

@@ -1,6 +1,6 @@
-# Phone Studio 0.3.1 — 9 October 2026
+# Phone Studio 0.3.2 — 9 October 2026
 
-The app and notebooks have been updated. Install `app/build/outputs/apk/debug/app-debug.apk` **over the existing app** to keep its saved connections, library, drafts and accepted jobs. This is a rebuilt debug APK, version 0.3.1/code 4, application ID `app.phonestudio`, Android 8/API 26 or newer. Do not uninstall or clear app data to update it. The follow-up audit, current results and rollback checkpoint are in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). The frozen 0.3.0 bundle remains intact.
+The app and notebooks have been updated. Install `app/build/outputs/apk/debug/app-debug.apk` **over the existing app** to keep its saved connections, library, drafts and accepted jobs. This is a rebuilt debug APK, version 0.3.2/code 5, application ID `app.phonestudio`, Android 8/API 26 or newer. Do not uninstall or clear app data to update it. The current audit, results and rollback checkpoint are in [SECOND_AUDIT.md](SECOND_AUDIT.md). Earlier 0.3.0 and 0.3.1 bundles remain intact.
 
 ## Easier connection
 
@@ -47,6 +47,8 @@ Only ZXing core 3.5.3 was added to the existing Android stack; no toolchain/depe
 No phone or emulator was connected. Actual camera permission/scanning, UI layout/animation at device font sizes/rotation, install/data retention, real 4B inference, GPU memory headroom, SDXL generation/manual editing and live third-worker rejoin remain untested. The Windows local GPU is not the selected Linux deployment. Local tests and QR matrices do not establish live runtime success or visual quality. The historical RAM and third-worker causes remain unproven/unreproduced.
 
 ## Rollback
+
+For 0.3.2 use the matching 0.3.1 checkpoint and procedure in [SECOND_AUDIT.md](SECOND_AUDIT.md). The following instructions concern earlier updates.
 
 For the 0.3.1 follow-up, use `.work-router/post-delivery-backup-20261009T055938Z/` and the exact procedure in [EXTENSIVE_VERIFICATION.md](EXTENSIVE_VERIFICATION.md). It restores the preceding 0.3.0 checkpoint. The older instructions below describe the initial UI update only.
 

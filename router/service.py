@@ -30,6 +30,7 @@ class RouterService:
                                    model_id=config.llm_model, revision=config.llm_revision)
         self.instance_id = str(uuid.uuid4())
         self.tasks = {}
+        self.cancel_tasks = {}
         self.listeners = {}
         self.job_slot = asyncio.Semaphore(1)
         self._submit_lock = asyncio.Lock()
@@ -42,20 +43,20 @@ class RouterService:
     async def start(self):
         await self.workers.start()
         for job in await asyncio.to_thread(self.journal.jobs):
-            if job["state"] not in TERMINAL:
-                self.schedule(job["jobId"])
+            self._schedule_saved(job)
 
     async def close(self):
         self._closing = True
-        for task in self.tasks.values():
+        pending = [*self.tasks.values(), *self.cancel_tasks.values()]
+        for task in pending:
             task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
         await self.workers.close()
         await self.llm.close()
         await asyncio.to_thread(self.journal.close)
 
     def schedule(self, job_id):
-        if self._closing or (job_id in self.tasks and not self.tasks[job_id].done()):
+        if self._closing or (job_id in self.tasks and not self.tasks[job_id].done()) or (job_id in self.cancel_tasks and not self.cancel_tasks[job_id].done()):
             return
         task = asyncio.create_task(self._run_guarded(job_id), name=f"router-job-{job_id}")
         self.tasks[job_id] = task
@@ -64,8 +65,51 @@ class RouterService:
                 self.tasks.pop(job_id, None)
         task.add_done_callback(completed)
 
+    @staticmethod
+    def _cancelable(worker):
+        # Successful/definitively failed peers are left intact. An earlier
+        # transport failure can still own accepted work that needs cancellation.
+        return worker.get("cancelRequested") is True or worker["state"] not in WORKER_TERMINAL or (
+            worker.get("submissionAttempted") and (worker["state"] == "submission_uncertain" or
+            (worker["state"] == "failed" and worker.get("resumeOnly"))))
+
+    def _schedule_saved(self, job):
+        pending_cancel = job["state"] == "cancelling" or any(worker.get("cancelRequested") for worker in job["workers"])
+        legacy_cancel = job["state"] == "cancelled" and any(self._cancelable(worker) and worker["state"] != "submission_uncertain" for worker in job["workers"])
+        if pending_cancel or legacy_cancel:
+            self.schedule_cancel(job["jobId"])
+        elif job["state"] not in TERMINAL:
+            self.schedule(job["jobId"])
+
+    def schedule_cancel(self, job_id):
+        task = self.cancel_tasks.get(job_id)
+        if self._closing or (task is not None and not task.done()):
+            return task
+        task = asyncio.create_task(self._cancel_saved(job_id), name=f"router-cancel-{job_id}")
+        self.cancel_tasks[job_id] = task
+        def completed(done):
+            if self.cancel_tasks.get(job_id) is done:
+                self.cancel_tasks.pop(job_id, None)
+            # Retrieve an unattended restart task's error without exposing its text.
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(completed)
+        return task
+
     async def get(self, job_id):
         return await asyncio.to_thread(self.journal.get, identifier(job_id, "Job ID"))
+
+    async def status(self, job_id):
+        async with self._submit_lock:
+            job = await asyncio.to_thread(self.journal.get, identifier(job_id, "Job ID"), True)
+            self._schedule_saved(job)
+            return job
+
+    async def recover(self, client_id, request_id):
+        async with self._submit_lock:
+            job = await asyncio.to_thread(self.journal.recover, identifier(client_id, "Client ID"), identifier(request_id, "Request ID"), True)
+            self._schedule_saved(job)
+            return job
 
     async def update(self, job_id, transform, durable=True):
         job = await asyncio.to_thread(self.journal.update, job_id, transform, durable)
@@ -75,6 +119,18 @@ class RouterService:
 
     async def set_fields(self, job_id, **fields):
         return await self.update(job_id, lambda job: job.update(fields))
+
+    async def _update_running(self, job_id, transform, durable=True):
+        # Cancellation reservation and runner publication are serialized by the
+        # journal lock, including writes already queued in the thread pool.
+        def guarded(current):
+            if current["state"] in {"cancelled", "cancelling"}:
+                raise asyncio.CancelledError()
+            transform(current)
+        return await self.update(job_id, guarded, durable)
+
+    async def _set_running_fields(self, job_id, **fields):
+        return await self._update_running(job_id, lambda job: job.update(fields))
 
     async def _store_prepared_edit(self, prepared):
         """Freeze actual masks/crops before any worker can accept their graph."""
@@ -132,8 +188,7 @@ class RouterService:
                     "runtimeId": "", "promptId": None, "error": None,
                     "requestId": str(uuid.uuid4()), "clientId": f"router-{uuid.uuid4()}", "submissionAttempted": False})
             job, _ = await asyncio.to_thread(self.journal.create_job, request, workers, self.config.job_timeout_seconds)
-            if job["state"] not in TERMINAL:
-                self.schedule(job["jobId"])
+            self._schedule_saved(job)
             return job
 
     async def health(self):
@@ -200,11 +255,11 @@ class RouterService:
                     await self._run(job_id)
         except asyncio.CancelledError:
             # Process shutdown preserves the journal for reconciliation. Explicit
-            # cancel has already persisted its terminal state before cancellation.
+            # cancel has already persisted its cancellation intent before stopping it.
             raise
         except Exception as error:
             job = await self.get(job_id)
-            if job["state"] == "cancelled":
+            if job["state"] in {"cancelled", "cancelling"}:
                 return
             if isinstance(error, (RouterError, WorkerFailure, MaskCorrectionRequired, LLMUnavailable)):
                 message = str(error)
@@ -213,6 +268,8 @@ class RouterService:
             else:
                 message = "Router could not finish this stage. Check its private notebook log."
             def fail(current):
+                if current["state"] in {"cancelled", "cancelling"}:
+                    return
                 uncertain = False
                 for worker in current["workers"]:
                     if worker["state"] not in WORKER_TERMINAL:
@@ -234,30 +291,30 @@ class RouterService:
         job = await self.get(job_id)
         if job["enhancementStatus"] == "pending":
             if job["options"]["enhancePrompt"] and job["operation"] == "generate":
-                await self.set_fields(job_id, state="enhancing")
+                await self._set_running_fields(job_id, state="enhancing")
                 try:
                     result = await self.llm.enhance(job)
                     effective = result.get("effectivePrompt")
                     if not isinstance(effective, str) or not effective.strip() or len(effective) > 8000:
                         raise RouterError("Prompt assistant returned invalid text.")
-                    await self.update(job_id, lambda item: item.update(effectivePrompt=effective,
+                    await self._update_running(job_id, lambda item: item.update(effectivePrompt=effective,
                         enhancementStatus=result.get("status", "enhanced"), warnings=item["warnings"] + result.get("warnings", [])))
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    await self.update(job_id, lambda item: item.update(enhancementStatus="unavailable",
+                    await self._update_running(job_id, lambda item: item.update(enhancementStatus="unavailable",
                         warnings=item["warnings"] + ["Prompt enhancement unavailable; the original prompt is used."]))
             else:
-                await self.set_fields(job_id, enhancementStatus="disabled" if not job["options"]["enhancePrompt"] else "planned_with_edit")
+                await self._set_running_fields(job_id, enhancementStatus="disabled" if not job["options"]["enhancePrompt"] else "planned_with_edit")
         job = await self.get(job_id)
         prepared = None
         if job["operation"] == "edit":
-            await self.set_fields(job_id, state="planning")
+            await self._set_running_fields(job_id, state="planning")
             source = await asyncio.to_thread(self.assets.path, job["sourceAssetId"])
             if job["editPlan"] is None:
                 plan = await self.llm.plan_edit(job, source)
                 plan.update(workingWidth=job["parameters"]["width"], workingHeight=job["parameters"]["height"])
-                await self.set_fields(job_id, editPlan=plan, effectivePrompt=plan["positivePrompt"])
+                await self._set_running_fields(job_id, editPlan=plan, effectivePrompt=plan["positivePrompt"])
                 job = await self.get(job_id)
             if job.get("preparedEdit"):
                 prepared = await self._restore_prepared_edit(job["preparedEdit"], source)
@@ -271,8 +328,8 @@ class RouterService:
                     raise RouterError("Automatic selection could not find a reliable mask. Add or correct the selection in Edit image.", 422, "mask_required")
                 manifest = await self._store_prepared_edit(prepared)
                 warnings = prepared.get("warnings", []) + job["editPlan"].get("warnings", []) + ["Editing disables experimental sampler/attention acceleration to preserve patch compatibility."]
-                await self.update(job_id, lambda item: item.update(preparedEdit=manifest, warnings=list(dict.fromkeys(item["warnings"] + warnings))))
-        await self.set_fields(job_id, state="dispatching")
+                await self._update_running(job_id, lambda item: item.update(preparedEdit=manifest, warnings=list(dict.fromkeys(item["warnings"] + warnings))))
+        await self._set_running_fields(job_id, state="dispatching")
         probes = {item["workerId"]: item for item in await self.workers.probes()}
         job = await self.get(job_id)
         async def one(worker):
@@ -284,9 +341,13 @@ class RouterService:
             async def change(fields, durable=True):
                 def apply(current):
                     target = next(item for item in current["workers"] if item["workerId"] == worker.worker_id)
-                    if current["state"] != "cancelled" and target["state"] not in WORKER_TERMINAL:
+                    if current["state"] not in {"cancelled", "cancelling"} and target["state"] not in WORKER_TERMINAL:
                         target.update(fields)
-                return await self.update(job_id, apply, durable)
+                changed = await self._update_running(job_id, apply, durable)
+                if changed["state"] in {"cancelled", "cancelling"}:
+                    # A no-op attempt publication must never permit a later POST.
+                    raise asyncio.CancelledError()
+                return changed
             try:
                 if record.get("submissionAttempted"):
                     observed_runtime = observed.get("runtimeId", "")
@@ -333,7 +394,7 @@ class RouterService:
                     if prepared["mode"] in {"replace", "outpaint"} and not fooocus:
                         message = (f"{worker.name}: stronger inpainting is off; using the ordinary same-checkpoint edit graph."
                                    if not requested_inpaint else f"{worker.name}: auxiliary inpaint patch unavailable or unsupported; using the ordinary same-checkpoint edit graph.")
-                        await self.update(job_id, lambda item: item.update(warnings=item["warnings"] +
+                        await self._update_running(job_id, lambda item: item.update(warnings=item["warnings"] +
                             [message]))
                     graph = build_edit(graph_params, actual_positive, actual_negative,
                                        record["seed"], source_name, mask_name, prepared["mode"], prepared["denoise"], fooocus=fooocus)
@@ -392,12 +453,12 @@ class RouterService:
                     "editPreparation": copy.deepcopy(job.get("preparedEdit", {}).get("metadata")) if prepared else None}
                 def finish(current):
                     target = next(item for item in current["workers"] if item["workerId"] == worker.worker_id)
-                    if current["state"] == "cancelled":
+                    if current["state"] in {"cancelled", "cancelling"}:
                         return
                     if not any(item["candidateId"] == candidate["candidateId"] for item in current["candidates"]):
                         current["candidates"].append(candidate)
                     target.update(state="complete", stage="Done", stepsDone=target["stepsTotal"], error=None, resumeOnly=False)
-                await self.update(job_id, finish)
+                await self._update_running(job_id, finish)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -415,19 +476,19 @@ class RouterService:
                         uncertain, resume_only = not known_prompt, known_prompt
                 message = str(error) if isinstance(error, (WorkerFailure, RouterError)) else "Worker stage failed; check the router notebook log."
                 await change({"state": "submission_uncertain" if uncertain else "failed", "stage": "Unconfirmed" if uncertain else "Failed", "error": message, "resumeOnly": resume_only})
-        await self.set_fields(job_id, state="rendering")
+        await self._set_running_fields(job_id, state="rendering")
         await asyncio.gather(*(one(worker) for worker in self.config.workers))
         job = await self.get(job_id)
         if not job["candidates"]:
             uncertain = any(item["state"] == "submission_uncertain" for item in job["workers"])
-            await self.set_fields(job_id, state="submission_uncertain" if uncertain else "failed",
+            await self._set_running_fields(job_id, state="submission_uncertain" if uncertain else "failed",
                 error="No worker produced a stored image. See worker status for the reason.",
                 selection={"status": "unavailable", "winnerCandidateId": None, "reason": "No candidates", "scores": [],
                            "reviewerModel": "", "reviewerRevision": ""})
             return
         selection = {"status": "disabled", "winnerCandidateId": None, "reason": "Automatic review is off.", "scores": [], "reviewerModel": "", "reviewerRevision": ""}
         if job["options"]["reviewCandidates"]:
-            await self.set_fields(job_id, state="reviewing")
+            await self._set_running_fields(job_id, state="reviewing")
             try:
                 paths = {candidate["assetId"]: await asyncio.to_thread(self.assets.path, candidate["assetId"]) for candidate in job["candidates"]}
                 if job["sourceAssetId"]:
@@ -449,34 +510,65 @@ class RouterService:
         success = sum(worker["state"] == "complete" for worker in job["workers"])
         warning = ((f"Selected from {success} of {len(job['workers'])} workers." if selection["status"] == "selected"
                    else f"{success} of {len(job['workers'])} workers produced stored candidates.") if success < len(job["workers"]) else None)
-        await self.update(job_id, lambda current: current.update(state="complete" if success == len(job["workers"]) else "partial",
+        await self._update_running(job_id, lambda current: current.update(state="complete" if success == len(job["workers"]) else "partial",
             selection=selection, warnings=current["warnings"] + ([warning] if warning else []), error=None))
         # Temporary graph/upload/crop files are no longer needed. Durable source
         # and candidate assets remain, including alternatives hidden on the phone.
         await asyncio.to_thread(shutil.rmtree, self.config.root / "work" / job_id, True)
 
     async def cancel(self, job_id):
-        job = await self.get(job_id)
-        if job["state"] in TERMINAL:
-            return job
-        await self.set_fields(job_id, state="cancelled", error="Cancelled by the phone; remote cancellation is best-effort.")
+        async with self._submit_lock:
+            job = await self.get(job_id)
+            if job["state"] in TERMINAL and not any(self._cancelable(worker) for worker in job["workers"]):
+                return job
+            if job["state"] != "cancelling":
+                await self._record_cancellation(job_id)
+            task = self.schedule_cancel(job_id)
+        if task is None:
+            raise RouterError("Router is stopping; cancellation remains saved for the next startup.", 503)
+        # A disconnected HTTP caller must not abandon owned cancellation work.
+        return await asyncio.shield(task)
+
+    async def _record_cancellation(self, job_id):
+        def reserve(current):
+            current.update(state="cancelling", error="Cancellation requested; remote confirmation is pending.")
+            for worker in current["workers"]:
+                if self._cancelable(worker):
+                    worker["cancelRequested"] = True
+        return await self.update(job_id, reserve)
+
+    async def _cancel_saved(self, job_id):
+        # Stop the owned runner before restoring legacy cancellation intent;
+        # it must not overwrite or publish work after that reservation.
         task = self.tasks.get(job_id)
         if task:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise  # Process shutdown leaves durable intent for startup.
+            except Exception:
+                pass  # A failed runner must not abandon cancellation authority.
+        job = await self.get(job_id)
+        if job["state"] != "cancelling":
+            await self._record_cancellation(job_id)  # Recover legacy interrupted Cancel.
         job = await self.get(job_id)
         for worker in self.config.workers:
             record = next(item for item in job["workers"] if item["workerId"] == worker.worker_id)
-            if record["state"] in WORKER_TERMINAL:
+            if not self._cancelable(record):
                 continue
-            cancelled = await self.workers.cancel(worker, record)
+            cancelled = not record.get("submissionAttempted") or await self.workers.cancel(worker, record)
             uncertain = record.get("submissionAttempted") and not cancelled
             def apply(current):
                 target = next(item for item in current["workers"] if item["workerId"] == worker.worker_id)
                 target.update(state="submission_uncertain" if uncertain else "cancelled",
-                              stage="Remote cancellation unconfirmed" if uncertain else "Cancelled")
+                              stage="Remote cancellation unconfirmed" if uncertain else "Cancelled",
+                              cancelRequested=False, cancellationConfirmed=not uncertain)
+                if not uncertain:
+                    target["resumeOnly"] = False
             await self.update(job_id, apply)
+        await self.set_fields(job_id, state="cancelled", error="Cancelled by the phone; remote cancellation is best-effort.")
         return await self.get(job_id)
 
     async def retry(self, job_id, request_id=None):
@@ -493,8 +585,9 @@ class RouterService:
                 raise RouterError("There are no confirmed failed workers to retry.", 409)
             for worker in job["workers"]:
                 if worker["workerId"] in retry_ids:
-                    legacy_accepted = "resumeOnly" not in worker and worker.get("submissionAttempted")
-                    if worker.get("resumeOnly") or legacy_accepted:
+                    confirmed_cancelled = worker["state"] == "cancelled"
+                    legacy_accepted = "resumeOnly" not in worker and worker.get("submissionAttempted") and not confirmed_cancelled
+                    if (worker.get("resumeOnly") or legacy_accepted) and not confirmed_cancelled:
                         if not worker.get("submissionAttempted") or not all(isinstance(worker.get(key), str) and worker[key]
                                 for key in ("promptId", "runtimeId", "requestId", "clientId")):
                             raise RouterError("Saved accepted render identity is missing. Another render will not be submitted.", 409, "submission_uncertain")
@@ -503,13 +596,14 @@ class RouterService:
                         worker.pop("acceptedOutput", None)
                         worker.update(requestId=str(uuid.uuid4()), clientId=f"router-{uuid.uuid4()}", submissionAttempted=False,
                                       promptId=None, runtimeId="", state="pending", stage="Waiting", error=None, stepsDone=0, stepsTotal=0, resumeOnly=False)
+                        worker.pop("cancellationConfirmed", None)
+                        worker.pop("cancelRequested", None)
             job.update(state="accepted", error=None, deadlineMillis=now_ms() + self.config.job_timeout_seconds * 1000,
                 selection={"status": "pending", "winnerCandidateId": None, "reason": "", "scores": [],
                            "reviewerModel": "", "reviewerRevision": ""})
         async with self._submit_lock:
             retried, created = await asyncio.to_thread(self.journal.retry, job_id, request_id, reset)
-            if retried["state"] not in TERMINAL:
-                self.schedule(job_id)
+            self._schedule_saved(retried)
             if created:
                 for listener in self.listeners.get(job_id, set()):
                     listener.set()
