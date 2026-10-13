@@ -1,0 +1,21 @@
+{
+  "release": "2026-10-01",
+  "files": {
+    "PHONE_STUDIO_COLAB.ipynb": {
+      "sha256": "8349d5f47a21689187ae48ee9263d61a704d41896e7f7e13c6330dd9b763f361",
+      "bytes": 190542
+    },
+    "PhoneStudio-2026-10-01-debug.apk": {
+      "sha256": "6c357c1749ad913040a9e329cce43a37e3600ec319dd6ec33ce09ef6124cbaa2",
+      "bytes": 17916109
+    },
+    "PhoneStudio-2026-10-01-source.zip": {
+      "sha256": "0dc2654bc36701d3faa732849e5760a5a5063f9b329a7d3eea7f823e57beca6b",
+      "bytes": 265419
+    },
+    "VERSION.md": {
+      "sha256": "324cd291c1c88015895673c9ae621723081f7017a98e4fb5455b0b60b765caa4",
+      "bytes": 1722
+    }
+  }
+}
